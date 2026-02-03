@@ -1,0 +1,76 @@
+{
+  "status": "OPTIMAL",
+  "assignments": [
+    {
+      "order_id": "O1",
+      "operation": "Op1",
+      "machine": "Arc Welding Machine",
+      "route_type": "PRIMARY",
+      "unit_time_min_per_unit": 1.77,
+      "setup_time_min": 3.67,
+      "quantity": 100.0,
+      "total_time_min": 180.67
+    },
+    {
+      "order_id": "O2",
+      "operation": "Op1",
+      "machine": "Spot Weld 2",
+      "route_type": "PRIMARY",
+      "unit_time_min_per_unit": 0.82,
+      "setup_time_min": 6.51,
+      "quantity": 100.0,
+      "total_time_min": 88.51
+    }
+  ],
+  "machine_summary": [
+    {
+      "machine": "Turret Machine 1",
+      "U_min": 0.0,
+      "OT_min": 0.0,
+      "A_min": 420.0,
+      "OT_max": 120.0,
+      "over_regular_time": false
+    },
+    {
+      "machine": "Turret Machine 2",
+      "U_min": 0.0,
+      "OT_min": 0.0,
+      "A_min": 420.0,
+      "OT_max": 120.0,
+      "over_regular_time": false
+    },
+    {
+      "machine": "Turret Machine 3",
+      "U_min": 0.0,
+      "OT_min": 0.0,
+      "A_min": 420.0,
+      "OT_max": 120.0,
+      "over_regular_time": false
+    },
+    {
+      "machine": "Arc Welding Machine",
+      "U_min": 180.67,
+      "OT_min": 0.0,
+      "A_min": 420.0,
+      "OT_max": 60.0,
+      "over_regular_time": false
+    },
+    {
+      "machine": "Spot Weld 1",
+      "U_min": 0.0,
+      "OT_min": 0.0,
+      "A_min": 420.0,
+      "OT_max": 60.0,
+      "over_regular_time": false
+    },
+    {
+      "machine": "Spot Weld 2",
+      "U_min": 88.51,
+      "OT_min": 0.0,
+      "A_min": 420.0,
+      "OT_max": 60.0,
+      "over_regular_time": false
+    }
+  ],
+  "backlogged_operations": []
+}
