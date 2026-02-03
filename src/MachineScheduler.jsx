@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Calendar, AlertCircle, CheckCircle, TrendingUp, Settings, Plus, BarChart3 } from 'lucide-react';
+import { Calendar, AlertCircle, CheckCircle, TrendingUp, Plus, BarChart3 } from 'lucide-react';
 
 const MachineScheduler = () => {
   const [machines, setMachines] = useState([
