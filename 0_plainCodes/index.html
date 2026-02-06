@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Machine Scheduler (Plain HTML)</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://unpkg.com/lucide@latest"></script>
+  </head>
+  <body>
+    <div class="page">
+      <div class="container">
+        <header class="header">
+          <h1 class="title">
+            <i data-lucide="factory" class="title-icon" aria-hidden="true"></i>
+            <span>🏭 Intelligent Machine Scheduling System</span>
+          </h1>
+          <p class="subtitle">Load Optimization &amp; Capacity Management</p>
+        </header>
+
+        <nav class="tabs" aria-label="Machine Scheduler Tabs">
+          <button class="tab active" data-tab="schedule" type="button">
+            <i data-lucide="plus" aria-hidden="true"></i>
+            <span>Schedule Job</span>
+          </button>
+          <button class="tab" data-tab="dashboard" type="button">
+            <i data-lucide="bar-chart-3" aria-hidden="true"></i>
+            <span>Utilization Dashboard</span>
+          </button>
+          <button class="tab" data-tab="calendar" type="button">
+            <i data-lucide="calendar" aria-hidden="true"></i>
+            <span>Calendar View</span>
+          </button>
+          <button class="tab" data-tab="forecast" type="button">
+            <i data-lucide="trending-up" aria-hidden="true"></i>
+            <span>Forecast</span>
+          </button>
+        </nav>
+
+        <main>
+          <section id="panel-schedule" class="panel active" data-panel="schedule">
+            <div class="grid-2">
+              <div class="card">
+                <h2 class="card-title">
+                  <i data-lucide="plus" aria-hidden="true"></i>
+                  <span>Schedule New Job</span>
+                </h2>
+
+                <div class="form">
+                  <div class="field">
+                    <label for="jobName">Job Name</label>
+                    <input id="jobName" type="text" placeholder="Enter job name" />
+                  </div>
+
+                  <div class="field">
+                    <label for="machineId">Select Machine</label>
+                    <select id="machineId">
+                      <option value="">Choose a machine...</option>
+                    </select>
+                  </div>
+
+                  <div class="field">
+                    <label for="units">Required Capacity (Units)</label>
+                    <input id="units" type="number" placeholder="e.g., 32000" />
+                  </div>
+
+                  <div class="grid-2">
+                    <div class="field">
+                      <label for="priority">Priority</label>
+                      <select id="priority">
+                        <option value="low">Low</option>
+                        <option value="normal" selected>Normal</option>
+                        <option value="high">High</option>
+                      </select>
+                    </div>
+
+                    <div class="field">
+                      <label for="targetMonth">Target Month</label>
+                      <input id="targetMonth" type="month" />
+                    </div>
+                  </div>
+
+                  <div id="capacityHint" class="hint hidden"></div>
+
+                  <button id="scheduleBtn" class="btn primary" type="button" disabled>
+                    Schedule Job
+                  </button>
+                </div>
+              </div>
+
+              <div class="card">
+                <h2 class="card-title">Machine Information</h2>
+                <div id="machineInfo" class="placeholder">Select a machine to view details</div>
+              </div>
+            </div>
+          </section>
+
+          <section id="panel-dashboard" class="panel" data-panel="dashboard">
+            <div class="row-between">
+              <h2 class="section-title">Machine Utilization Dashboard</h2>
+              <input id="dashboardMonth" type="month" />
+            </div>
+            <div id="dashboardGrid" class="grid-cards"></div>
+          </section>
+
+          <section id="panel-calendar" class="panel" data-panel="calendar">
+            <div class="row-between">
+              <h2 class="section-title">Scheduled Jobs Calendar</h2>
+              <input id="calendarMonth" type="month" />
+            </div>
+            <div id="calendarList" class="stack"></div>
+          </section>
+
+          <section id="panel-forecast" class="panel" data-panel="forecast">
+            <h2 class="section-title">Capacity Forecast (Next 3 Months)</h2>
+            <div id="forecastStack" class="stack"></div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div id="modalOverlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal">
+        <div id="modalBody"></div>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
