@@ -23,15 +23,23 @@ body {
   height: 100%;
 }
 
+html {
+  min-height: 100%;
+  background: radial-gradient(800px 500px at 20% 10%, rgba(34, 211, 238, 0.15), transparent 60%),
+    radial-gradient(800px 500px at 70% 30%, rgba(59, 130, 246, 0.18), transparent 55%),
+    linear-gradient(135deg, #0b1220, #0d1a36, #0b1220);
+  background-repeat: no-repeat;
+  background-size: cover;
+  background-attachment: fixed;
+}
+
 body {
   margin: 0;
   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
     "Apple Color Emoji", "Segoe UI Emoji";
   color: var(--text);
   color-scheme: dark;
-  background: radial-gradient(800px 500px at 20% 10%, rgba(34, 211, 238, 0.15), transparent 60%),
-    radial-gradient(800px 500px at 70% 30%, rgba(59, 130, 246, 0.18), transparent 55%),
-    linear-gradient(135deg, #0b1220, #0d1a36, #0b1220);
+  background: transparent;
 }
 
 .page {
@@ -139,11 +147,11 @@ body {
     align-items: stretch;
   }
 
-  .actions {
+  .modal .actions {
     width: 100%;
   }
 
-  .actions .btn {
+  .modal .actions .btn {
     width: 100%;
   }
 
@@ -153,10 +161,14 @@ body {
 
   .modal-overlay {
     padding: 12px;
+    align-items: flex-start;
   }
 
   .modal {
     padding: 14px;
+    margin-top: 12px;
+    margin-bottom: 12px;
+    max-height: calc(100vh - 24px);
   }
 }
 
@@ -455,6 +467,113 @@ select:focus {
   color: var(--muted2);
 }
 
+.forecast-table-wrap {
+  width: 100%;
+}
+
+.util-legend {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.util-legend-items {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.util-table-scroll {
+  width: 100%;
+  overflow: auto;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.25);
+}
+
+.util-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  min-width: 980px;
+  background: var(--card);
+}
+
+.util-table th,
+.util-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  border-right: 1px solid rgba(148, 163, 184, 0.12);
+  text-align: center;
+  font-size: 13px;
+}
+
+
+
+.util-table tbody tr:hover td,
+.util-table tbody tr:hover th {
+  filter: brightness(1.06);
+}
+
+.util-table thead th {
+  position: sticky;
+  top: 0;
+  background: rgba(15, 27, 51, 0.95);
+  z-index: 3;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.util-table .sticky-col {
+  position: sticky;
+  left: 0;
+  text-align: left;
+  min-width: 220px;
+  max-width: 260px;
+  background: rgba(15, 27, 51, 0.92);
+  z-index: 2;
+  font-weight: 900;
+}
+
+.util-table thead .sticky-col {
+  z-index: 4;
+}
+
+.util-cell {
+  font-weight: 900;
+  border-radius: 0;
+  background-clip: padding-box;
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.14);
+}
+
+.util-cell.green {
+  background: rgba(34, 197, 94, 0.24);
+  color: #bbf7d0;
+}
+
+.util-cell.yellow {
+  background: rgba(234, 179, 8, 0.24);
+  color: #fef08a;
+}
+
+.util-cell.red {
+  background: rgba(239, 68, 68, 0.24);
+  color: #fecaca;
+}
+
+@media (max-width: 640px) {
+  .util-table {
+    min-width: 860px;
+  }
+
+  .util-table .sticky-col {
+    min-width: 180px;
+    max-width: 220px;
+  }
+}
+
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -472,6 +591,12 @@ select:focus {
   border-radius: 18px;
   box-shadow: var(--shadow);
   padding: 18px;
+}
+
+/* Ensure modal content never overflows the viewport */
+.modal {
+  max-height: calc(100vh - 36px);
+  overflow: auto;
 }
 
 .modal h3 {

@@ -666,6 +666,7 @@ function renderDashboard() {
   // Summary card
   const summary = document.createElement('div');
   summary.className = 'card';
+  summary.style.gridColumn = '1 / -1';
   summary.innerHTML = `
     <div style="font-weight: 900; font-size: 16px; margin-bottom: 10px;">Utilization Summary</div>
     <div class="grid-2" style="grid-template-columns: 1fr 1fr; gap: 10px;">
@@ -1004,49 +1005,77 @@ function renderForecast() {
   const stack = document.getElementById('forecastStack');
   stack.innerHTML = '';
 
-  const months = [];
-  const today = new Date();
-  for (let i = 0; i < 3; i++) {
-    const date = new Date(today.getFullYear(), today.getMonth() + i, 1);
-    months.push(isoMonth(date));
-  }
+  const year = Number.parseInt(String(state.currentMonth || isoMonth(new Date())).slice(0, 4), 10);
+  const months = Array.from({ length: 12 }, (_, idx) => {
+    const m = idx + 1;
+    return `${year}-${String(m).padStart(2, '0')}`;
+  });
+  const monthLabels = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+  const machineNames = state.machines.map((m) => m.name);
+  const utilByMonthMachine = {};
 
   for (const month of months) {
-    const section = document.createElement('div');
-    section.className = 'item';
-
-    const solution = getSolution(month);
-    const utilArr = computeUtilization({ machineSummary: solution.machine_summary });
-
-    const innerCards = solution.machine_summary
-      .map((ms) => {
-        const u = utilArr.find((x) => x.machine === ms.machine);
-        const pct = (u?.regularUtil ?? 0) * 100;
-        return `
-          <div class="item" style="padding: 10px;">
-            <div class="item-top" style="margin-bottom: 6px;">
-              <div style="font-weight: 800; font-size: 13px;">${escapeHtml(ms.machine)}</div>
-              <span class="pill ${getPillClass(pct)}">${pct.toFixed(1)}%</span>
-            </div>
-            <div class="progress" style="height: 10px;"><div class="${getUtilizationClass(pct)}" style="width: ${Math.min(
-          pct,
-          100
-        )}%;"></div></div>
-            <div class="small" style="margin-top: 6px;">U: ${ms.U_min.toFixed(0)} / A: ${ms.A_min.toFixed(0)} min</div>
-          </div>
-        `;
-      })
-      .join('');
-
-    section.innerHTML = `
-      <div style="font-size: 18px; font-weight: 900; margin-bottom: 10px; color: rgba(96, 165, 250, 1);">${escapeHtml(
-        monthLabel(month)
-      )}</div>
-      <div class="grid-cards">${innerCards}</div>
-    `;
-
-    stack.appendChild(section);
+    const sol = getSolution(month);
+    const utilArr = computeUtilization({ machineSummary: sol.machine_summary });
+    const map = {};
+    for (const ms of sol.machine_summary) {
+      const u = utilArr.find((x) => x.machine === ms.machine);
+      map[ms.machine] = (u?.regularUtil ?? 0) * 100;
+    }
+    utilByMonthMachine[month] = map;
   }
+
+  const wrap = document.createElement('div');
+  wrap.className = 'forecast-table-wrap';
+
+  wrap.innerHTML = `
+    <div class="util-legend">
+      <div class="small muted">Legend</div>
+      <div class="util-legend-items">
+        <span class="pill yellow">Under (&lt;70%)</span>
+        <span class="pill green">Normal (70–89%)</span>
+        <span class="pill red">Over (≥90%)</span>
+      </div>
+    </div>
+  `;
+
+  const head = `
+    <thead>
+      <tr>
+        <th class="sticky-col">MACHINE NAME</th>
+        ${monthLabels.map((m) => `<th>${m}</th>`).join('')}
+      </tr>
+    </thead>
+  `;
+
+  const body = `
+    <tbody>
+      ${machineNames
+        .map((mach) => {
+          const tds = months
+            .map((month) => {
+              const pct = utilByMonthMachine?.[month]?.[mach] ?? 0;
+              const cls = getPillClass(pct);
+              return `<td class="util-cell ${cls}">${pct.toFixed(0)}%</td>`;
+            })
+            .join('');
+          return `<tr><th class="sticky-col">${escapeHtml(mach)}</th>${tds}</tr>`;
+        })
+        .join('')}
+    </tbody>
+  `;
+
+  wrap.insertAdjacentHTML(
+    'beforeend',
+    `
+      <div class="util-table-scroll">
+        <table class="util-table">${head}${body}</table>
+      </div>
+    `
+  );
+
+  stack.appendChild(wrap);
 }
 
 function syncFormToInputs() {
