@@ -28,6 +28,7 @@ body {
   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
     "Apple Color Emoji", "Segoe UI Emoji";
   color: var(--text);
+  color-scheme: dark;
   background: radial-gradient(800px 500px at 20% 10%, rgba(34, 211, 238, 0.15), transparent 60%),
     radial-gradient(800px 500px at 70% 30%, rgba(59, 130, 246, 0.18), transparent 55%),
     linear-gradient(135deg, #0b1220, #0d1a36, #0b1220);
@@ -81,6 +82,82 @@ body {
   border-radius: 12px;
   backdrop-filter: blur(10px);
   margin-bottom: 18px;
+}
+
+@media (max-width: 640px) {
+  .page {
+    padding: 14px;
+  }
+
+  .header {
+    margin-bottom: 14px;
+  }
+
+  .title {
+    font-size: 26px;
+    gap: 8px;
+  }
+
+  .title-icon {
+    width: 24px;
+    height: 24px;
+  }
+
+  .tabs {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+  }
+
+  .tab {
+    flex: 1;
+    min-width: 140px;
+    justify-content: center;
+  }
+
+  .card {
+    padding: 14px;
+  }
+
+  .card-title,
+  .section-title {
+    font-size: 20px;
+  }
+
+  .row-between {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .row-between input[type='month'] {
+    width: 100%;
+  }
+
+  .item-top {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .actions {
+    width: 100%;
+  }
+
+  .actions .btn {
+    width: 100%;
+  }
+
+  .kv {
+    grid-template-columns: 1fr;
+  }
+
+  .modal-overlay {
+    padding: 12px;
+  }
+
+  .modal {
+    padding: 14px;
+  }
 }
 
 .tab {
@@ -167,6 +244,12 @@ body {
   margin-bottom: 6px;
 }
 
+.field-subtext {
+  margin-top: 8px;
+  font-size: 13px;
+  color: rgba(226, 232, 240, 0.85);
+}
+
 input,
 select {
   width: 100%;
@@ -176,6 +259,15 @@ select {
   background: rgba(51, 65, 85, 0.35);
   color: var(--text);
   outline: none;
+}
+
+select {
+  background-color: rgba(15, 27, 51, 0.92);
+}
+
+select option {
+  background-color: #0f1b33;
+  color: #e5e7eb;
 }
 
 input:focus,
