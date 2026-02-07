@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Machine Scheduler (Plain HTML)</title>
+    <title>Machine Scheduler</title>
     <link rel="stylesheet" href="styles.css" />
     <script src="https://unpkg.com/lucide@latest"></script>
   </head>
@@ -19,6 +19,10 @@
         </header>
 
         <nav class="tabs" aria-label="Machine Scheduler Tabs">
+          <button class="tab" data-tab="login" type="button" id="loginTabBtn">
+            <i data-lucide="lock" aria-hidden="true"></i>
+            <span>Login</span>
+          </button>
           <button class="tab active" data-tab="schedule" type="button">
             <i data-lucide="plus" aria-hidden="true"></i>
             <span>Schedule Job</span>
@@ -27,17 +31,73 @@
             <i data-lucide="bar-chart-3" aria-hidden="true"></i>
             <span>Utilization Dashboard</span>
           </button>
-          <button class="tab" data-tab="calendar" type="button">
-            <i data-lucide="calendar" aria-hidden="true"></i>
-            <span>Calendar View</span>
-          </button>
           <button class="tab" data-tab="forecast" type="button">
             <i data-lucide="trending-up" aria-hidden="true"></i>
             <span>Monthly Utilization</span>
           </button>
+          <button class="tab" data-tab="calendar" type="button">
+            <i data-lucide="calendar" aria-hidden="true"></i>
+            <span>Calendar View</span>
+          </button>
+
+          <button class="btn neutral" type="button" id="logoutBtn" style="margin-left: auto; padding: 10px 12px; display: none;">
+            Logout
+          </button>
         </nav>
 
         <main>
+          <section id="panel-login" class="panel" data-panel="login">
+            <div class="grid-2">
+              <div class="card">
+                <h2 class="card-title">
+                  <i data-lucide="lock" aria-hidden="true"></i>
+                  <span>Login</span>
+                </h2>
+
+                <div class="form">
+                  <div class="field">
+                    <label for="loginUsername">Username</label>
+                    <input id="loginUsername" type="text" autocomplete="username" />
+                  </div>
+
+                  <div class="field">
+                    <label for="loginPassword">Password</label>
+                    <input id="loginPassword" type="password" autocomplete="current-password" />
+                  </div>
+
+                  <button class="btn primary" type="button" id="loginBtn">Login</button>
+                  <div id="loginError" class="small" style="color: #fecaca; display: none;"></div>
+                </div>
+              </div>
+
+              <div class="card">
+                <h2 class="card-title">
+                  <i data-lucide="target" aria-hidden="true"></i>
+                  <span>System Purpose</span>
+                </h2>
+                <div class="stack" style="gap: 12px;">
+                  <p class="small muted">
+                    This Intelligent Machine Scheduling System is designed to streamline production planning through mathematical optimization.
+                  </p>
+                  <div class="stack" style="gap: 10px;">
+                    <div class="item">
+                      <div style="font-weight: 700; color: var(--cyan); font-size: 13px; margin-bottom: 2px;">Maximize Efficiency</div>
+                      <p class="small muted" style="margin: 0;">Reduces machine idle time and balances workload across all available resources.</p>
+                    </div>
+                    <div class="item">
+                      <div style="font-weight: 700; color: var(--cyan); font-size: 13px; margin-bottom: 2px;">Smart Planning</div>
+                      <p class="small muted" style="margin: 0;">Uses advanced algorithms to meet production targets while minimizing overtime and backlogs.</p>
+                    </div>
+                    <div class="item">
+                      <div style="font-weight: 700; color: var(--cyan); font-size: 13px; margin-bottom: 2px;">Real-time Insights</div>
+                      <p class="small muted" style="margin: 0;">Provides instant visibility into monthly capacity through an interactive heatmap dashboard.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
           <section id="panel-schedule" class="panel active" data-panel="schedule">
             <div class="grid-2">
               <div class="card">
@@ -155,17 +215,29 @@
           </section>
 
           <section id="panel-dashboard" class="panel" data-panel="dashboard">
-            <div class="row-between">
-              <h2 class="section-title">Machine Utilization Dashboard</h2>
-              <input id="dashboardMonth" type="month" />
+            <div class="row-between" style="align-items: flex-end; margin-bottom: 20px;">
+              <div>
+                <h2 class="section-title" style="margin-bottom: 4px;">Utilization Dashboard</h2>
+                <p class="muted small">Machine performance and capacity overview</p>
+              </div>
+              <div class="filter-group">
+                <label for="dashboardMonth" class="small muted">Select Month</label>
+                <input id="dashboardMonth" type="month" class="input-compact" />
+              </div>
             </div>
             <div id="dashboardGrid" class="grid-cards"></div>
           </section>
 
           <section id="panel-calendar" class="panel" data-panel="calendar">
-            <div class="row-between">
-              <h2 class="section-title">Scheduled Jobs Calendar</h2>
-              <input id="calendarMonth" type="month" />
+            <div class="row-between" style="align-items: flex-end; margin-bottom: 20px;">
+              <div>
+                <h2 class="section-title" style="margin-bottom: 4px;">Scheduled Jobs Calendar</h2>
+                <p class="muted small">View and manage orders for the selected month</p>
+              </div>
+              <div class="filter-group">
+                <label for="calendarMonth" class="small muted">Filter Month</label>
+                <input id="calendarMonth" type="month" class="input-compact" />
+              </div>
             </div>
             <div id="calendarList" class="stack"></div>
           </section>

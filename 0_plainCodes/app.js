@@ -16,6 +16,7 @@ const state = {
   machines: structuredClone(MACHINES),
   // Orders are what the user enters (Order ID, Part Code, Quantity).
   orders: [],
+  user: null,
   // Solutions are derived per month by running the scheduler.
   solutionsByMonth: {},
   activeTab: 'schedule',
@@ -31,6 +32,110 @@ const state = {
 };
 
 let machineInfoPreviewTimer = null;
+
+function clamp(n, a, b) {
+  return Math.min(b, Math.max(a, n));
+}
+
+function utilHeatStyle(pct) {
+  const p = clamp(Number(pct) || 0, 0, 150);
+
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const mixRgb = (c1, c2, t) => [
+    Math.round(lerp(c1[0], c2[0], t)),
+    Math.round(lerp(c1[1], c2[1], t)),
+    Math.round(lerp(c1[2], c2[2], t))
+  ];
+
+  // HSL colors converted to RGB for interpolation
+  const GREEN_RGB = [34, 197, 94];   // Approx HSL(120, 85%, 45%)
+  const ORANGE_RGB = [249, 115, 22]; // Midpoint for 90%
+  const RED_RGB = [239, 68, 68];    // Final over-utilized
+
+  let rgb;
+  let hue;
+
+  if (p <= 90) {
+    // Keep user's exact hue logic for 0-90% (Yellow -> Green)
+    hue = 50 + (120 - 50) * (p / 90);
+    // Use HSLA directly for this range as requested
+    const bg = `hsla(${hue.toFixed(1)}, 85%, 45%, 0.32)`;
+    const fg = `hsl(${hue.toFixed(1)}, 90%, 84%)`;
+    return { bg, fg };
+  } else {
+    // For > 90%, use RGB interpolation to avoid the "hue-back-to-yellow" bug.
+    // Transition: Green -> Orange -> Red
+    const t = clamp((p - 90) / 30, 0, 1);
+    rgb = mixRgb(ORANGE_RGB, RED_RGB, t);
+    
+    const bg = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.35)`;
+    const fgRgb = mixRgb(rgb, [255, 255, 255], 0.75);
+    const fg = `rgb(${fgRgb[0]}, ${fgRgb[1]}, ${fgRgb[2]})`;
+    return { bg, fg };
+  }
+}
+
+async function apiFetchJson(url, options) {
+  const res = await fetch(url, {
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    ...options
+  });
+  const txt = await res.text();
+  let json = null;
+  try {
+    json = txt ? JSON.parse(txt) : null;
+  } catch {
+    // ignore
+  }
+  if (!res.ok) {
+    const msg = json?.error || `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  return json;
+}
+
+async function apiMe() {
+  return apiFetchJson('./api/auth.php');
+}
+
+async function apiLogin({ username, password }) {
+  return apiFetchJson('./api/auth.php', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'login', username, password })
+  });
+}
+
+async function apiLogout() {
+  return apiFetchJson('./api/auth.php', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'logout' })
+  });
+}
+
+function setAuthUi(isAuthed) {
+  const loginTabBtn = document.getElementById('loginTabBtn');
+  const logoutBtn = document.getElementById('logoutBtn');
+  if (loginTabBtn) loginTabBtn.style.display = isAuthed ? 'none' : '';
+  if (logoutBtn) logoutBtn.style.display = isAuthed ? '' : 'none';
+}
+
+async function apiListOrders() {
+  const data = await apiFetchJson('./api/orders.php');
+  return Array.isArray(data?.orders) ? data.orders : [];
+}
+
+async function apiCreateOrder(order) {
+  await apiFetchJson('./api/orders.php', { method: 'POST', body: JSON.stringify(order) });
+}
+
+async function apiUpdateOrder(order) {
+  await apiFetchJson('./api/orders.php', { method: 'PUT', body: JSON.stringify(order) });
+}
+
+async function apiDeleteOrder(id) {
+  await apiFetchJson(`./api/orders.php?id=${encodeURIComponent(String(id))}`, { method: 'DELETE' });
+}
 
 function sanityCheckEmbeddedData() {
   // This check verifies that you are using the FULL embedded Excel extraction
@@ -92,21 +197,36 @@ function sanityCheckEmbeddedData() {
 }
 
 function loadData() {
-  // Persistence disabled for now (in-memory session only).
-  // Clear any legacy/stale data from earlier versions to avoid confusing UI state.
-  try {
-    localStorage.removeItem(STORAGE_KEYS.orders);
-    localStorage.removeItem(STORAGE_KEYS.solutionsByMonth);
-  } catch {
-    // ignore
-  }
+  // Prefer loading orders from the PHP/MySQL backend.
+  // If the API is unreachable, we continue in-memory.
+  apiListOrders()
+    .then((rows) => {
+      state.orders = rows.map((r) => ({
+        id: Number(r.id),
+        order_id: r.order_id,
+        part_code: r.part_code,
+        quantity: Number(r.quantity),
+        month: r.month,
+        priority: r.priority || 'normal',
+        createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString()
+      }));
+      state.solutionsByMonth = {};
+      solveForMonth(state.currentMonth);
+      render();
+    })
+    .catch(() => {
+      // fallback: keep in-memory
+    });
 }
 
 function saveData() {
-  // Persistence disabled for now (in-memory session only).
+  // Orders are persisted via the API calls.
 }
 
 function setActiveTab(tabId) {
+  if (!state.user && tabId !== 'login') {
+    tabId = 'login';
+  }
   state.activeTab = tabId;
 
   document.querySelectorAll('.tab').forEach((btn) => {
@@ -356,7 +476,7 @@ function nextMonthStr(monthStr) {
   return `${nextY}-${String(nextM).padStart(2, '0')}`;
 }
 
-function handleScheduleJob() {
+async function handleScheduleJob() {
   const qty = Number.parseFloat(state.jobForm.units);
   if (!Number.isFinite(qty) || qty <= 0 || !state.jobForm.partCode) {
     alert('Please select part code and enter a valid quantity');
@@ -374,6 +494,20 @@ function handleScheduleJob() {
   };
 
   state.orders = [...state.orders, order];
+
+  try {
+    await apiCreateOrder({
+      id: order.id,
+      order_id: order.order_id,
+      part_code: order.part_code,
+      quantity: order.quantity,
+      month: order.month,
+      priority: order.priority,
+      created_at: order.createdAt
+    });
+  } catch {
+    // fallback: keep in-memory
+  }
 
   // Run the scheduler for the selected month.
   solveForMonth(order.month);
@@ -625,6 +759,10 @@ function deleteOrder(orderId) {
   const order = state.orders.find((o) => o.id === orderId);
   state.orders = state.orders.filter((o) => o.id !== orderId);
 
+  apiDeleteOrder(orderId).catch(() => {
+    // ignore
+  });
+
   if (order) {
     solveForMonth(order.month);
   }
@@ -764,6 +902,20 @@ function renderCalendar() {
 
     const assigns = solution.assignments.filter((a) => a.order_id === order.order_id);
     const backlogs = solution.backlogged_operations.filter((b) => b.order_id === order.order_id);
+
+    // Lighten up the border if any assigned machine is over-utilized
+    const utilArr = computeUtilization({ machineSummary: solution.machine_summary });
+    const hasOverUtilizedMachine = assigns.some(a => {
+      const ms = solution.machine_summary.find(m => m.machine === a.machine);
+      if (!ms) return false;
+      const u = utilArr.find(x => x.machine === a.machine);
+      return ((u?.regularUtil ?? 0) * 100) >= 90;
+    });
+
+    if (hasOverUtilizedMachine) {
+      wrap.style.borderColor = 'rgba(206, 50, 50, 1)';
+      wrap.style.borderWidth = '2px';
+    }
 
     const assignsHtml = assigns.length
       ? assigns
@@ -967,7 +1119,7 @@ function showEditOrderModal(orderId) {
 
   if (!save) return;
 
-  save.addEventListener('click', () => {
+  save.addEventListener('click', async () => {
     const part = document.getElementById('editPartCode').value;
     const qty = Number.parseFloat(document.getElementById('editQty').value);
     const priority = document.getElementById('editPriority').value;
@@ -991,6 +1143,22 @@ function showEditOrderModal(orderId) {
           }
         : o
     );
+
+    const updatedOrder = state.orders.find((o) => o.id === orderId);
+    if (updatedOrder) {
+      try {
+        await apiUpdateOrder({
+          id: updatedOrder.id,
+          order_id: updatedOrder.order_id,
+          part_code: updatedOrder.part_code,
+          quantity: updatedOrder.quantity,
+          month: updatedOrder.month,
+          priority: updatedOrder.priority
+        });
+      } catch {
+        // ignore
+      }
+    }
 
     solveForMonth(oldMonth);
     if (month !== oldMonth) solveForMonth(month);
@@ -1056,8 +1224,8 @@ function renderForecast() {
           const tds = months
             .map((month) => {
               const pct = utilByMonthMachine?.[month]?.[mach] ?? 0;
-              const cls = getPillClass(pct);
-              return `<td class="util-cell ${cls}">${pct.toFixed(0)}%</td>`;
+              const s = utilHeatStyle(pct);
+              return `<td class="util-cell" style="background:${s.bg}; color:${s.fg};">${pct.toFixed(0)}%</td>`;
             })
             .join('');
           return `<tr><th class="sticky-col">${escapeHtml(mach)}</th>${tds}</tr>`;
@@ -1104,6 +1272,48 @@ function wireEvents() {
     btn.addEventListener('click', () => setActiveTab(btn.dataset.tab));
   });
 
+  const loginBtn = document.getElementById('loginBtn');
+  if (loginBtn) {
+    loginBtn.addEventListener('click', async () => {
+      const username = document.getElementById('loginUsername').value.trim();
+      const password = document.getElementById('loginPassword').value;
+      const err = document.getElementById('loginError');
+      if (err) {
+        err.style.display = 'none';
+        err.textContent = '';
+      }
+
+      try {
+        const res = await apiLogin({ username, password });
+        state.user = res?.user ?? { username };
+        setAuthUi(true);
+        loadData();
+        setActiveTab('schedule');
+      } catch (e) {
+        if (err) {
+          err.style.display = '';
+          err.textContent = String(e?.message || 'Login failed');
+        }
+      }
+    });
+  }
+
+  const logoutBtn = document.getElementById('logoutBtn');
+  if (logoutBtn) {
+    logoutBtn.addEventListener('click', async () => {
+      try {
+        await apiLogout();
+      } catch {
+        // ignore
+      }
+      state.user = null;
+      state.orders = [];
+      state.solutionsByMonth = {};
+      setAuthUi(false);
+      setActiveTab('login');
+    });
+  }
+
   document.getElementById('partCode').addEventListener('change', (e) => setJobForm({ partCode: e.target.value }));
   document.getElementById('units').addEventListener('input', (e) => setJobForm({ units: e.target.value }));
   document.getElementById('priority').addEventListener('change', (e) => setJobForm({ priority: e.target.value }));
@@ -1137,7 +1347,23 @@ function wireEvents() {
 }
 
 function init() {
-  loadData();
+  apiMe()
+    .then((d) => {
+      const authed = !!d?.user;
+      state.user = d?.user ?? null;
+      setAuthUi(authed);
+      if (!authed) {
+        setActiveTab('login');
+        renderIcons();
+        return;
+      }
+      loadData();
+    })
+    .catch(() => {
+      state.user = null;
+      setAuthUi(false);
+      setActiveTab('login');
+    });
 
   state.currentMonth = isoMonth(new Date());
   state.jobForm.month = isoMonth(new Date());

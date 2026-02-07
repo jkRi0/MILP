@@ -83,126 +83,127 @@ body {
 
 .tabs {
   display: flex;
-  gap: 8px;
-  padding: 8px;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
   background: rgba(15, 27, 51, 0.55);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 16px;
   backdrop-filter: blur(10px);
-  margin-bottom: 18px;
+  margin-bottom: 24px;
 }
 
-@media (max-width: 640px) {
-  .page {
-    padding: 14px;
-  }
-
-  .header {
-    margin-bottom: 14px;
-  }
-
-  .title {
-    font-size: 26px;
-    gap: 8px;
-  }
-
-  .title-icon {
-    width: 24px;
-    height: 24px;
-  }
-
+@media (min-width: 768px) {
   .tabs {
+    flex-direction: row;
     flex-wrap: wrap;
-    justify-content: center;
-    gap: 10px;
-  }
-
-  .tab {
-    flex: 1;
-    min-width: 140px;
-    justify-content: center;
-  }
-
-  .card {
-    padding: 14px;
-  }
-
-  .card-title,
-  .section-title {
-    font-size: 20px;
-  }
-
-  .row-between {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
-  }
-
-  .row-between input[type='month'] {
-    width: 100%;
-  }
-
-  .item-top {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .modal .actions {
-    width: 100%;
-  }
-
-  .modal .actions .btn {
-    width: 100%;
-  }
-
-  .kv {
-    grid-template-columns: 1fr;
-  }
-
-  .modal-overlay {
-    padding: 12px;
-    align-items: flex-start;
-  }
-
-  .modal {
-    padding: 14px;
-    margin-top: 12px;
-    margin-bottom: 12px;
-    max-height: calc(100vh - 24px);
+    padding: 6px;
+    border-radius: 12px;
   }
 }
 
 .tab {
-  appearance: none;
-  border: 1px solid transparent;
-  background: rgba(51, 65, 85, 0.45);
-  color: var(--muted);
-  padding: 8px 12px;
-  border-radius: 10px;
-  cursor: pointer;
-  transition: transform 120ms ease, background 120ms ease, color 120ms ease;
-  font-weight: 600;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: 1px solid transparent;
+  width: 100%;
 }
 
-.tab svg,
-.tab i {
-  width: 14px;
-  height: 14px;
+.tab i, .tab svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
 }
 
-.tab:hover {
-  background: rgba(51, 65, 85, 0.7);
-  transform: translateY(-1px);
+@media (min-width: 768px) {
+  .tab {
+    flex: 1;
+    padding: 8px 12px;
+    background: transparent;
+    justify-content: center;
+    width: auto;
+  }
+  .tab i, .tab svg {
+    width: 16px;
+    height: 16px;
+  }
 }
 
 .tab.active {
-  background: rgba(59, 130, 246, 0.95);
-  color: white;
-  box-shadow: 0 12px 40px rgba(59, 130, 246, 0.25);
+  background: rgba(34, 211, 238, 0.15);
+  color: var(--cyan);
+  border-color: rgba(34, 211, 238, 0.4);
+}
+
+#logoutBtn {
+  width: 100%;
+  margin-top: 4px;
+}
+
+@media (min-width: 768px) {
+  #logoutBtn {
+    width: auto;
+    margin-top: 0;
+    margin-left: auto;
+  }
+}
+
+/* Responsive Section */
+@media (max-width: 768px) {
+  .page {
+    padding: 14px;
+  }
+  .header {
+    margin-bottom: 14px;
+  }
+  .title {
+    font-size: 24px;
+    gap: 8px;
+  }
+  .title-icon {
+    width: 22px;
+    height: 22px;
+  }
+  .card {
+    padding: 14px;
+  }
+  .card-title,
+  .section-title {
+    font-size: 18px;
+  }
+  .row-between {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .item-top {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .modal-overlay {
+    padding: 12px;
+    align-items: flex-start;
+  }
+  .modal {
+    padding: 16px;
+    max-height: calc(100vh - 40px);
+  }
+  .modal .actions {
+    flex-direction: column;
+  }
+  .modal .actions .btn {
+    width: 100%;
+  }
 }
 
 .panel {
@@ -337,10 +338,70 @@ select:focus {
 
 .row-between {
   display: flex;
-  gap: 12px;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+@media (min-width: 768px) {
+  .row-between {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+}
+
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+@media (min-width: 768px) {
+  .filter-group {
+    width: auto;
+    align-items: flex-end;
+  }
+}
+
+.input-compact {
+  padding: 10px 14px !important;
+  font-size: 14px !important;
+  width: 100% !important;
+  background: rgba(15, 27, 51, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: white;
+  transition: all 0.2s ease;
+}
+
+@media (min-width: 768px) {
+  .input-compact {
+    width: auto !important;
+    min-width: 180px;
+  }
+}
+
+.input-compact:hover {
+  background: rgba(148, 163, 184, 0.1);
+  border-color: rgba(34, 211, 238, 1);
+}
+
+.input-compact:focus {
+  outline: none;
+  border-color: rgba(34, 211, 238, 1);
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.2);
+}
+
+.input-compact::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.input-compact::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
 }
 
 .grid-cards {
@@ -546,21 +607,7 @@ select:focus {
   border-radius: 0;
   background-clip: padding-box;
   box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.14);
-}
-
-.util-cell.green {
-  background: rgba(34, 197, 94, 0.24);
-  color: #bbf7d0;
-}
-
-.util-cell.yellow {
-  background: rgba(234, 179, 8, 0.24);
-  color: #fef08a;
-}
-
-.util-cell.red {
-  background: rgba(239, 68, 68, 0.24);
-  color: #fecaca;
+  transition: background-color 180ms ease, color 180ms ease;
 }
 
 @media (max-width: 640px) {
