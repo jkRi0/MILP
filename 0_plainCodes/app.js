@@ -296,6 +296,42 @@ function renderScheduleFormDerived() {
   updateScheduleButtonState();
 }
 
+function simplifyReason(reason) {
+  if (!reason) return 'No reason provided';
+  
+  // Strip common technical terms and codes
+  let clean = reason
+    .replace(/\(A_min \+ OT_max\)/g, 'exceeds total monthly capacity')
+    .replace(/A_min/g, 'regular capacity')
+    .replace(/OT_max/g, 'overtime limit')
+    .replace(/U_min/g, 'utilized minutes')
+    .replace(/OT_min/g, 'overtime minutes')
+    .replace(/min/g, 'minutes')
+    .replace(/:\s*\d+\s*\|/g, ':') // Remove count numbers
+    .replace(/\(\d+%\)/g, '') // Remove percentages
+    .replace(/needs [\d.]+ minutes but [\w_]+ is [\d.]+ minutes \(over by [\d.]+ minutes\)/g, (match) => {
+        const parts = match.match(/over by ([\d.]+) minutes/);
+        return parts ? `requires ${parts[1]} more minutes than available` : 'exceeds available time';
+    });
+
+  // Handle "Closest Machine" part
+  if (clean.includes('closest machine')) {
+    const parts = clean.split('closest machine');
+    const machineNameMatch = parts[1].match(/"([^"]+)"/);
+    const machineName = machineNameMatch ? machineNameMatch[1] : 'alternative machine';
+    const detail = parts[1].split(':').pop().trim();
+    return `Closest Machine: ${machineName} - ${detail}`;
+  }
+
+  // Fallback for "No Feasible Machine"
+  if (clean.includes('No feasible machine')) {
+    const detail = clean.split(':').pop().trim();
+    return `No Feasible Machine - ${detail}`;
+  }
+
+  return clean;
+}
+
 function renderMachineInfo() {
   const container = document.getElementById('machineInfo');
   const partCode = state.jobForm.partCode;
@@ -371,9 +407,7 @@ function renderMachineInfo() {
     const backlogHtml = previewBacklogs.length
       ? `<div class="stack" style="gap: 6px; margin-top: 10px;">${previewBacklogs
           .map(
-            (b) => `<div class="small" style="color: #fecaca;">Backlogged: <strong>${escapeHtml(
-              b.operation
-            )}</strong> — ${escapeHtml(b.reason || '')}</div>`
+            (b) => `<div class="small" style="color: #fecaca;"><strong>${escapeHtml(b.operation)}:</strong> ${escapeHtml(simplifyReason(b.reason))}</div>`
           )
           .join('')}</div>`
       : '';
@@ -476,6 +510,38 @@ function nextMonthStr(monthStr) {
   return `${nextY}-${String(nextM).padStart(2, '0')}`;
 }
 
+async function moveOrderToMonth(orderId, newMonth) {
+  const order = state.orders.find(o => o.id === orderId);
+  if (!order) return;
+
+  const oldMonth = order.month;
+  
+  // 1. Update local state
+  state.orders = state.orders.map(o => o.id === orderId ? { ...o, month: newMonth } : o);
+  order.month = newMonth;
+
+  // 2. Persist to DB
+  try {
+    await apiUpdateOrder({
+      id: order.id,
+      order_id: order.order_id,
+      part_code: order.part_code,
+      quantity: order.quantity,
+      month: newMonth,
+      priority: order.priority,
+      created_at: order.createdAt
+    });
+  } catch (err) {
+    console.error('Failed to update order month on server:', err);
+  }
+
+  // 3. Re-solve both months
+  solveForMonth(oldMonth);
+  solveForMonth(newMonth);
+  saveData();
+  render();
+}
+
 async function handleScheduleJob() {
   const qty = Number.parseFloat(state.jobForm.units);
   if (!Number.isFinite(qty) || qty <= 0 || !state.jobForm.partCode) {
@@ -513,11 +579,57 @@ async function handleScheduleJob() {
   solveForMonth(order.month);
   saveData();
 
-  const solution = state.solutionsByMonth[order.month];
-  const assigned = solution.assignments.filter((a) => a.order_id === order.order_id);
-  const backlogged = solution.backlogged_operations.filter((b) => b.order_id === order.order_id);
+  let currentMonth = order.month;
+  let currentSolution = state.solutionsByMonth[currentMonth];
+  let wasAutoRescheduled = false;
+  let autoRescheduleReason = '';
 
-  const utilArr = computeUtilization({ machineSummary: solution.machine_summary });
+  // Auto-reschedule triggers:
+  // - backlogged operations
+  // - severe over-utilization (keeps the existing UX safe with cancel/revert)
+  const AUTO_OVERUTIL_THRESHOLD_PCT = 110;
+  const autoGuardMax = 2;
+  let autoGuard = 0;
+
+  while (autoGuard < autoGuardMax) {
+    autoGuard += 1;
+
+    const assigned0 = currentSolution.assignments.filter((a) => a.order_id === order.order_id);
+    const backlogged0 = currentSolution.backlogged_operations.filter((b) => b.order_id === order.order_id);
+
+    const utilArr0 = computeUtilization({ machineSummary: currentSolution.machine_summary });
+    const assignedMachines0 = [...new Set(assigned0.map((a) => a.machine))];
+    const assignedMachineUtil0 = assignedMachines0
+      .map((m) => {
+        const u = utilArr0.find((x) => x.machine === m);
+        return { machine: m, pct: (u?.regularUtil ?? 0) * 100 };
+      })
+      .sort((a, b) => b.pct - a.pct);
+
+    const hasSevereOver = assignedMachineUtil0.some((x) => x.pct >= AUTO_OVERUTIL_THRESHOLD_PCT);
+
+    if (!wasAutoRescheduled && (backlogged0.length > 0 || hasSevereOver)) {
+      wasAutoRescheduled = true;
+      autoRescheduleReason = backlogged0.length
+        ? 'This order was moved because it could not be fully completed in the selected month.'
+        : `This order was moved because it would severely overload one or more machines (≥${AUTO_OVERUTIL_THRESHOLD_PCT}%).`;
+
+      const nextMonth = nextMonthStr(currentMonth);
+      await moveOrderToMonth(order.id, nextMonth);
+      currentMonth = nextMonth;
+      currentSolution = state.solutionsByMonth[currentMonth];
+      continue;
+    }
+
+    break;
+  }
+
+  const nextMonth = nextMonthStr(order.month);
+
+  const assigned = currentSolution.assignments.filter((a) => a.order_id === order.order_id);
+  const backlogged = currentSolution.backlogged_operations.filter((b) => b.order_id === order.order_id);
+
+  const utilArr = computeUtilization({ machineSummary: currentSolution.machine_summary });
   const assignedMachines = [...new Set(assigned.map((a) => a.machine))];
   const assignedMachineUtil = assignedMachines
     .map((m) => {
@@ -528,12 +640,15 @@ async function handleScheduleJob() {
 
   const anyOver = assignedMachineUtil.some((x) => x.pct >= 90);
   const anyAltUsed = assigned.some((a) => a.route_type === 'ALT');
-  const needsHelp = backlogged.length > 0 || anyOver;
 
   let bodyHtml = `
-    <div style="font-size: 16px; font-weight: 800; margin-bottom: 6px;">Order <strong>${escapeHtml(
-      order.order_id
-    )}</strong> scheduled for <strong>${escapeHtml(monthLabel(order.month))}</strong></div>
+    <div style="font-size: 16px; font-weight: 800; margin-bottom: 6px;">
+      Order <strong>${escapeHtml(order.order_id)}</strong> 
+      ${wasAutoRescheduled ? `automatically moved to <strong>${escapeHtml(monthLabel(nextMonth))}</strong>` : `scheduled for <strong>${escapeHtml(monthLabel(order.month))}</strong>`}
+    </div>
+    ${wasAutoRescheduled ? `<div class="hint" style="margin-bottom: 12px; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); color: #fecaca;">
+      ${escapeHtml(autoRescheduleReason || '')}
+    </div>` : ''}
     <div class="muted" style="margin-bottom: 12px;">Part: <strong>${escapeHtml(order.part_code)}</strong> | Quantity: <strong>${order.quantity}</strong></div>
   `;
 
@@ -563,9 +678,9 @@ async function handleScheduleJob() {
 
   if (backlogged.length) {
     const rows = backlogged
-      .map((b) => `<div class="item" style="padding: 10px; border-color: rgba(239, 68, 68, 0.35);">${escapeHtml(
+      .map((b) => `<div class="item" style="padding: 10px; border-color: rgba(239, 68, 68, 0.35);"><strong>${escapeHtml(
         b.operation
-      )} (backlogged) — ${escapeHtml(b.reason || '')}</div>`)
+      )}:</strong> ${escapeHtml(simplifyReason(b.reason))}</div>`)
       .join('');
     bodyHtml += `
       <div style="font-weight: 900; margin-top: 14px; margin-bottom: 8px; color: rgba(239, 68, 68, 1);">Backlogged</div>
@@ -583,40 +698,43 @@ async function handleScheduleJob() {
     `;
   }
 
-  if (needsHelp) {
+  if (wasAutoRescheduled || anyOver) {
     const rebalanceCap = Math.max(0.6, SOLVER_CONFIG.primaryUtilizationCap - 0.15);
-    const nextMonth = nextMonthStr(order.month);
-
+    
     bodyHtml += `
-      <div style="font-weight: 900; margin-top: 14px; margin-bottom: 8px;">Rescheduling recommendations</div>
+      <div style="font-weight: 900; margin-top: 14px; margin-bottom: 8px;">Rescheduling Actions</div>
       <div class="item" style="padding: 10px;">
         <div class="small" style="margin-bottom: 10px;">
-          ${backlogged.length ? 'This order has backlogged operations. ' : ''}
+          ${backlogged.length ? 'This order still has backlogged operations in the new month. ' : ''}
           ${anyOver ? 'Some assigned machines are over-utilized. ' : ''}
-          ${anyAltUsed ? 'Alternatives were used for some steps. ' : ''}
         </div>
         <div class="actions" style="justify-content: flex-start; gap: 10px; flex-wrap: wrap;">
-          <button class="btn" type="button" id="rebalanceBtn">Rebalance (allow alts earlier)</button>
-          <button class="btn" type="button" id="nextMonthBtn">Move order to ${escapeHtml(nextMonth)} and re-solve</button>
-        </div>
-        <div class="small muted" style="margin-top: 10px;">
-          Rebalance runs the same month with a lower primary utilization cap (${(rebalanceCap * 100).toFixed(
-            0
-          )}%) so 1.1 alternatives are considered sooner when primary machines are queued.
+          ${wasAutoRescheduled ? `<button class="btn danger" type="button" id="cancelRescheduleBtn">Cancel & Revert to ${escapeHtml(monthLabel(state.jobForm.month))}</button>` : ''}
+          <button class="btn" type="button" id="rebalanceBtn">Try Rebalance (allow alts earlier)</button>
+          ${!wasAutoRescheduled ? `<button class="btn" type="button" id="nextMonthBtn">Move order to ${escapeHtml(nextMonth)}</button>` : ''}
         </div>
       </div>
     `;
   }
 
   renderModalHtml({
-    title: 'Schedule Result',
-    titleColor: assigned.length ? '#86efac' : '#fecaca',
+    title: wasAutoRescheduled ? 'Automatic Reschedule' : 'Schedule Result',
+    titleColor: assigned.length && backlogged.length === 0 ? '#86efac' : '#fde68a',
     bodyHtml
   });
 
-  if (needsHelp) {
+  if (wasAutoRescheduled || anyOver) {
+    const cancelBtn = document.getElementById('cancelRescheduleBtn');
     const rebalanceBtn = document.getElementById('rebalanceBtn');
     const nextMonthBtn = document.getElementById('nextMonthBtn');
+
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', async () => {
+        await moveOrderToMonth(order.id, state.jobForm.month);
+        closeModal();
+        alert(`Order reverted to ${monthLabel(state.jobForm.month)}`);
+      });
+    }
 
     if (rebalanceBtn) {
       rebalanceBtn.addEventListener('click', () => {
@@ -680,13 +798,30 @@ async function handleScheduleJob() {
     }
 
     if (nextMonthBtn) {
-      nextMonthBtn.addEventListener('click', () => {
+      nextMonthBtn.addEventListener('click', async () => {
         const oldMonth = order.month;
         const newMonth = nextMonthStr(order.month);
 
+        // 1. Update the order object in the local state
         state.orders = state.orders.map((o) => (o.id === order.id ? { ...o, month: newMonth } : o));
         order.month = newMonth;
 
+        // 2. Persist the change to the database
+        try {
+          await apiUpdateOrder({
+            id: order.id,
+            order_id: order.order_id,
+            part_code: order.part_code,
+            quantity: order.quantity,
+            month: newMonth,
+            priority: order.priority,
+            created_at: order.createdAt
+          });
+        } catch (err) {
+          console.error('Failed to update order month on server:', err);
+        }
+
+        // 3. Re-solve for both affected months
         solveForMonth(oldMonth);
         solveForMonth(newMonth);
         saveData();
@@ -1169,6 +1304,208 @@ function showEditOrderModal(orderId) {
   });
 }
 
+function solveGlobalReoptimization(allOrders) {
+  // Sort orders by priority and date to maintain some stability
+  const sortedOrders = [...allOrders].sort((a, b) => {
+    const priorityMap = { high: 0, normal: 1, low: 2 };
+    if (priorityMap[a.priority] !== priorityMap[b.priority]) {
+      return priorityMap[a.priority] - priorityMap[b.priority];
+    }
+    return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+  });
+
+  const year = Number.parseInt(String(state.currentMonth || isoMonth(new Date())).slice(0, 4), 10);
+  const months = Array.from({ length: 12 }, (_, idx) => `${year}-${String(idx + 1).padStart(2, '0')}`);
+
+  const optimizedOrders = [];
+
+  const cap = Number.isFinite(SOLVER_CONFIG.primaryUtilizationCap)
+    ? SOLVER_CONFIG.primaryUtilizationCap
+    : 0.9;
+
+  const evaluateMonth = (month, ordersInMonth) => {
+    const sol = solveScheduleGreedy({
+      machines: state.machines,
+      orders: ordersInMonth.map((o) => ({
+        order_id: o.order_id,
+        part_code: o.part_code,
+        quantity: o.quantity
+      })),
+      routingLong: ROUTING_LONG,
+      machineRoute: MACHINE_ROUTE,
+      times: TIMES,
+      allowBacklog: SOLVER_CONFIG.allowBacklog,
+      lambdaOT: SOLVER_CONFIG.lambdaOT,
+      lambdaBL: SOLVER_CONFIG.lambdaBL,
+      lambdaALT: SOLVER_CONFIG.lambdaALT,
+      primaryUtilizationCap: SOLVER_CONFIG.primaryUtilizationCap
+    });
+
+    const utilArr = computeUtilization({ machineSummary: sol.machine_summary });
+    const maxRegularUtil = utilArr.reduce((acc, u) => Math.max(acc, u.regularUtil || 0), 0);
+    return { sol, backlogCount: sol.backlogged_operations.length, maxRegularUtil };
+  };
+
+  // Phase 1: move whole orders forward (no splitting), prefer fewer backlogs and lower over-cap.
+  for (const order of sortedOrders) {
+    let bestMonth = order.month;
+    let bestScore = null;
+
+    const startIdx = months.indexOf(order.month);
+    const searchMonths = startIdx === -1 ? [order.month] : months.slice(startIdx);
+
+    for (const m of searchMonths) {
+      const mIdx = months.indexOf(m);
+      const shiftMonths = startIdx === -1 || mIdx === -1 ? 0 : Math.max(0, mIdx - startIdx);
+      const current = optimizedOrders.filter((o) => o.month === m);
+      const testOrders = [...current, { ...order, month: m }];
+      const { backlogCount, maxRegularUtil } = evaluateMonth(m, testOrders);
+
+      const overCap = Math.max(0, maxRegularUtil - cap);
+      // Weighted score:
+      // - backlog dominates
+      // - then over-cap magnitude
+      // - then penalty for moving too far forward (encourages smoother month distribution)
+      const BACKLOG_W = 1_000_000_000;
+      const OVERCAP_W = 1_000_000;
+      const SHIFT_W = 1_000;
+      const weighted = backlogCount * BACKLOG_W + overCap * OVERCAP_W + shiftMonths * SHIFT_W;
+      const score = { backlogCount, overCap, shiftMonths, weighted };
+
+      if (bestScore === null) {
+        bestScore = score;
+        bestMonth = m;
+        continue;
+      }
+
+      if (score.weighted < bestScore.weighted) {
+        bestScore = score;
+        bestMonth = m;
+      }
+
+      // Conservative: if we found a month with no backlog and no over-cap, accept immediately.
+      if (score.backlogCount === 0 && score.overCap <= 1e-6) {
+        bestMonth = m;
+        break;
+      }
+    }
+
+    optimizedOrders.push({ ...order, month: bestMonth });
+  }
+
+  // Phase 2 (conservative split): if a month still exceeds the cap, split low-priority orders forward.
+  const priorityRank = { high: 0, normal: 1, low: 2 };
+  const idTaken = new Set(optimizedOrders.map((o) => o.id));
+
+  const makeChildId = () => {
+    let id = Math.floor(Date.now() + Math.random() * 100000);
+    while (idTaken.has(id)) id += 1;
+    idTaken.add(id);
+    return id;
+  };
+
+  const monthIndexByValue = Object.fromEntries(months.map((m, idx) => [m, idx]));
+  const monthAt = (idx) => months[Math.max(0, Math.min(months.length - 1, idx))];
+
+  for (let mi = 0; mi < months.length - 1; mi += 1) {
+    const m = monthAt(mi);
+    let changed = true;
+    let guard = 0;
+
+    while (changed && guard < 20) {
+      guard += 1;
+      changed = false;
+
+      const monthOrders = optimizedOrders.filter((o) => o.month === m);
+      if (!monthOrders.length) break;
+
+      const { maxRegularUtil } = evaluateMonth(m, monthOrders);
+      if (maxRegularUtil <= cap + 1e-6) break;
+
+      // Pick a candidate: lowest priority first, then newest first, then biggest quantity.
+      const candidates = [...monthOrders]
+        .filter((o) => (o.quantity ?? 0) > 1)
+        .sort((a, b) => {
+          const pa = priorityRank[a.priority] ?? 1;
+          const pb = priorityRank[b.priority] ?? 1;
+          if (pa !== pb) return pb - pa;
+          const ta = new Date(a.createdAt || a.created_at || 0).getTime();
+          const tb = new Date(b.createdAt || b.created_at || 0).getTime();
+          if (ta !== tb) return tb - ta;
+          return (b.quantity ?? 0) - (a.quantity ?? 0);
+        });
+
+      const target = candidates[0];
+      if (!target) break;
+
+      const nextM = monthAt(mi + 1);
+      const baseQty = Number.parseFloat(target.quantity) || 0;
+      const minKeep = 1;
+      const maxKeep = Math.max(minKeep, Math.floor(baseQty));
+
+      // Binary search max qty we can keep in current month while meeting cap.
+      let lo = minKeep;
+      let hi = maxKeep;
+      let bestKeep = minKeep;
+
+      const restOrders = monthOrders.filter((o) => o.id !== target.id);
+
+      while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        const testOrders = [...restOrders, { ...target, quantity: mid, month: m }];
+        const { maxRegularUtil: maxU } = evaluateMonth(m, testOrders);
+        if (maxU <= cap + 1e-6) {
+          bestKeep = mid;
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+
+      // If we can't reduce enough (keeping 1 still over-cap), skip splitting this order.
+      if (bestKeep >= baseQty) break;
+
+      const remainder = baseQty - bestKeep;
+      if (remainder <= 0.0001) break;
+
+      // Apply: reduce original qty, create child order in next month.
+      const childId = makeChildId();
+      const childSuffix = String(childId).slice(-4);
+      const childOrderId = `${target.order_id}-S${childSuffix}`;
+
+      for (let i = 0; i < optimizedOrders.length; i += 1) {
+        if (optimizedOrders[i].id === target.id) {
+          optimizedOrders[i] = { ...optimizedOrders[i], quantity: bestKeep };
+          break;
+        }
+      }
+
+      optimizedOrders.push({
+        ...target,
+        id: childId,
+        order_id: childOrderId,
+        quantity: remainder,
+        month: nextM
+      });
+
+      changed = true;
+    }
+  }
+
+  // Keep output stable-ish (by month then priority then createdAt)
+  return [...optimizedOrders].sort((a, b) => {
+    const ma = monthIndexByValue[a.month] ?? 999;
+    const mb = monthIndexByValue[b.month] ?? 999;
+    if (ma !== mb) return ma - mb;
+
+    const pa = priorityRank[a.priority] ?? 1;
+    const pb = priorityRank[b.priority] ?? 1;
+    if (pa !== pb) return pa - pb;
+
+    return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+  });
+}
+
 function renderForecast() {
   const stack = document.getElementById('forecastStack');
   stack.innerHTML = '';
@@ -1196,6 +1533,13 @@ function renderForecast() {
 
   const wrap = document.createElement('div');
   wrap.className = 'forecast-table-wrap';
+
+  const reoptimizeBtn = document.createElement('button');
+  reoptimizeBtn.className = 'btn primary';
+  reoptimizeBtn.style.marginBottom = '20px';
+  reoptimizeBtn.innerHTML = '<i data-lucide="refresh-cw" style="width:16px;height:16px;margin-right:8px;"></i> Re-optimize Load';
+  reoptimizeBtn.addEventListener('click', handleGlobalReoptimize);
+  stack.appendChild(reoptimizeBtn);
 
   wrap.innerHTML = `
     <div class="util-legend">
@@ -1244,6 +1588,151 @@ function renderForecast() {
   );
 
   stack.appendChild(wrap);
+}
+
+async function handleGlobalReoptimize() {
+  const optimizedOrders = solveGlobalReoptimization(state.orders);
+  
+  // Calculate preview data
+  const year = Number.parseInt(String(state.currentMonth || isoMonth(new Date())).slice(0, 4), 10);
+  const months = Array.from({ length: 12 }, (_, idx) => `${year}-${String(idx + 1).padStart(2, '0')}`);
+  const machineNames = state.machines.map((m) => m.name);
+  const monthLabels = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+  const getTableHtml = (ordersList, title) => {
+    const utilMap = {};
+    months.forEach(m => {
+      const sol = solveScheduleGreedy({
+        machines: state.machines,
+        orders: ordersList.filter(o => o.month === m).map(o => ({ order_id: o.order_id, part_code: o.part_code, quantity: o.quantity })),
+        routingLong: ROUTING_LONG,
+        machineRoute: MACHINE_ROUTE,
+        times: TIMES,
+        allowBacklog: SOLVER_CONFIG.allowBacklog,
+        lambdaOT: SOLVER_CONFIG.lambdaOT,
+        lambdaBL: SOLVER_CONFIG.lambdaBL,
+        lambdaALT: SOLVER_CONFIG.lambdaALT,
+        primaryUtilizationCap: SOLVER_CONFIG.primaryUtilizationCap
+      });
+      const uArr = computeUtilization({ machineSummary: sol.machine_summary });
+      utilMap[m] = {};
+      sol.machine_summary.forEach(ms => {
+        const u = uArr.find(x => x.machine === ms.machine);
+        utilMap[m][ms.machine] = (u?.regularUtil ?? 0) * 100;
+      });
+    });
+
+    return `
+      <div class="reopt-section">
+        <div class="reopt-section-title">${title}</div>
+        <div class="util-table-scroll reopt-table-scroll">
+          <table class="util-table" style="font-size: 11px;">
+            <thead>
+              <tr><th class="sticky-col">MACHINE</th>${monthLabels.map(m => `<th>${m}</th>`).join('')}</tr>
+            </thead>
+            <tbody>
+              ${machineNames.map(mach => `
+                <tr>
+                  <th class="sticky-col">${escapeHtml(mach)}</th>
+                  ${months.map(m => {
+                    const pct = utilMap[m][mach] ?? 0;
+                    const s = utilHeatStyle(pct);
+                    return `<td style="background:${s.bg}; color:${s.fg};">${pct.toFixed(0)}%</td>`;
+                  }).join('')}
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  };
+
+  renderModalHtml({
+    title: 'Global Re-optimization Preview',
+    titleColor: '#22d3ee',
+    bodyHtml: `
+      <div class="reopt-modal">
+        <div class="small muted" style="margin-bottom: 12px;">
+          The system has calculated a new distribution of orders across the year to minimize over-utilization and backlogs.
+        </div>
+
+        ${getTableHtml(state.orders, 'Current utilization')}
+
+        <div class="reopt-divider"></div>
+        <br><br>
+        ${getTableHtml(optimizedOrders, 'Optimized preview')}
+
+        <div class="hint" style="margin-top: 14px;">
+          Click <strong>Save Changes</strong> to apply this new schedule to all orders in the database.
+        </div>
+      </div>
+    `
+  });
+
+  const modalBody = document.getElementById('modalBody');
+  const actions = modalBody?.querySelector('.actions');
+  const modalClose = modalBody?.querySelector('#modalClose');
+  if (modalClose) modalClose.textContent = 'Cancel';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn primary';
+  saveBtn.textContent = 'Save Changes';
+  saveBtn.addEventListener('click', async () => {
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+    
+    try {
+      const originalById = Object.fromEntries(state.orders.map((o) => [o.id, o]));
+
+      const toUpdate = optimizedOrders.filter((opt) => {
+        const orig = originalById[opt.id];
+        if (!orig) return false;
+        const q0 = Number.parseFloat(orig.quantity) || 0;
+        const q1 = Number.parseFloat(opt.quantity) || 0;
+        return orig.month !== opt.month || Math.abs(q0 - q1) > 1e-6 || orig.priority !== opt.priority;
+      });
+
+      const toCreate = optimizedOrders.filter((opt) => !originalById[opt.id]);
+
+      for (const order of toUpdate) {
+        await apiUpdateOrder({
+          id: order.id,
+          order_id: order.order_id,
+          part_code: order.part_code,
+          quantity: order.quantity,
+          month: order.month,
+          priority: order.priority,
+          created_at: order.createdAt
+        });
+      }
+
+      for (const order of toCreate) {
+        await apiCreateOrder({
+          id: order.id,
+          order_id: order.order_id,
+          part_code: order.part_code,
+          quantity: order.quantity,
+          month: order.month,
+          priority: order.priority,
+          created_at: order.createdAt
+        });
+      }
+
+      state.orders = optimizedOrders;
+      state.solutionsByMonth = {}; // Clear cache
+      solveForMonth(state.currentMonth);
+      saveData();
+      closeModal();
+      render();
+      alert(`Successfully re-optimized ${toUpdate.length + toCreate.length} orders across the year.`);
+    } catch (err) {
+      alert('Failed to save some changes: ' + err.message);
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save Changes';
+    }
+  });
+  actions.insertBefore(saveBtn, modalClose);
 }
 
 function syncFormToInputs() {

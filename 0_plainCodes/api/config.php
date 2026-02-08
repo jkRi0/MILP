@@ -15,7 +15,7 @@ function db(): mysqli {
     $host = '127.0.0.1';
     $user = 'root';
     $pass = '';
-    $name = 'milp_scheduler';
+    $name = 'milp';
 
     $conn = new mysqli($host, $user, $pass, $name);
     if ($conn->connect_error) {
