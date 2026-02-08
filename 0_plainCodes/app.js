@@ -75,6 +75,13 @@ function utilHeatStyle(pct) {
   }
 }
 
+function splitRefInfo(orderId) {
+  const id = String(orderId || '');
+  const m = id.match(/^(.*?)-S\d+$/);
+  if (!m) return { isSplitChild: false, parentOrderId: '' };
+  return { isSplitChild: true, parentOrderId: m[1] };
+}
+
 async function apiFetchJson(url, options) {
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
@@ -542,6 +549,134 @@ async function moveOrderToMonth(orderId, newMonth) {
   render();
 }
 
+async function splitOrderIntoNextMonth(orderId, thresholdPct) {
+  const order = state.orders.find((o) => o.id === orderId);
+  if (!order) return { ok: false, reason: 'Order not found' };
+
+  const month = order.month;
+  const nextM = nextMonthStr(month);
+  const baseQty = Number.parseFloat(order.quantity) || 0;
+  if (!Number.isFinite(baseQty) || baseQty <= 1) {
+    return { ok: false, reason: 'Quantity too small to split' };
+  }
+
+  const ordersForMonthBase = state.orders
+    .filter((o) => o.month === month)
+    .map((o) => ({ order_id: o.order_id, part_code: o.part_code, quantity: o.quantity }));
+
+  const solveWithQty = (q) => {
+    const ordersForMonth = ordersForMonthBase.map((o) =>
+      o.order_id === order.order_id ? { ...o, quantity: q } : o
+    );
+    return solveScheduleGreedy({
+      machines: state.machines,
+      orders: ordersForMonth,
+      routingLong: ROUTING_LONG,
+      machineRoute: MACHINE_ROUTE,
+      times: TIMES,
+      allowBacklog: SOLVER_CONFIG.allowBacklog,
+      lambdaOT: SOLVER_CONFIG.lambdaOT,
+      lambdaBL: SOLVER_CONFIG.lambdaBL,
+      lambdaALT: SOLVER_CONFIG.lambdaALT,
+      primaryUtilizationCap: SOLVER_CONFIG.primaryUtilizationCap
+    });
+  };
+
+  const computeAssignedUtilPct = (solution) => {
+    const assigned = solution.assignments.filter((a) => a.order_id === order.order_id);
+    const utilArr = computeUtilization({ machineSummary: solution.machine_summary });
+    const machines = [...new Set(assigned.map((a) => a.machine))];
+    return machines
+      .map((m) => {
+        const u = utilArr.find((x) => x.machine === m);
+        return (u?.regularUtil ?? 0) * 100;
+      })
+      .sort((a, b) => b - a);
+  };
+
+  const minKeep = 1;
+  const maxKeep = Math.max(minKeep, Math.floor(baseQty));
+  let lo = minKeep;
+  let hi = maxKeep;
+  let bestKeep = 0;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const sol = solveWithQty(mid);
+    const backlogged = sol.backlogged_operations.filter((b) => b.order_id === order.order_id);
+    const utilPct = computeAssignedUtilPct(sol);
+    const severe = utilPct.some((p) => p >= thresholdPct);
+
+    if (backlogged.length === 0 && !severe) {
+      bestKeep = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  if (bestKeep <= 0 || bestKeep >= baseQty) {
+    await moveOrderToMonth(orderId, nextM);
+    return { ok: true, didSplit: false, movedTo: nextM };
+  }
+
+  const remainder = baseQty - bestKeep;
+  if (remainder <= 0.0001) {
+    await moveOrderToMonth(orderId, nextM);
+    return { ok: true, didSplit: false, movedTo: nextM };
+  }
+
+  const childId = Math.floor(Date.now() + Math.random() * 100000);
+  const childOrderId = `${order.order_id}-S${String(childId).slice(-4)}`;
+  const child = {
+    id: childId,
+    order_id: childOrderId,
+    part_code: order.part_code,
+    quantity: remainder,
+    month: nextM,
+    priority: order.priority,
+    createdAt: new Date().toISOString()
+  };
+
+  order.quantity = bestKeep;
+  state.orders = state.orders.map((o) => (o.id === order.id ? { ...o, quantity: bestKeep } : o));
+  try {
+    await apiUpdateOrder({
+      id: order.id,
+      order_id: order.order_id,
+      part_code: order.part_code,
+      quantity: order.quantity,
+      month: order.month,
+      priority: order.priority,
+      created_at: order.createdAt
+    });
+  } catch {
+    // ignore
+  }
+
+  state.orders = [...state.orders, child];
+  try {
+    await apiCreateOrder({
+      id: child.id,
+      order_id: child.order_id,
+      part_code: child.part_code,
+      quantity: child.quantity,
+      month: child.month,
+      priority: child.priority,
+      created_at: child.createdAt
+    });
+  } catch {
+    // ignore
+  }
+
+  solveForMonth(month);
+  solveForMonth(nextM);
+  saveData();
+  render();
+
+  return { ok: true, didSplit: true, keptQty: bestKeep, childQty: remainder, childMonth: nextM, childOrderId };
+}
+
 async function handleScheduleJob() {
   const qty = Number.parseFloat(state.jobForm.units);
   if (!Number.isFinite(qty) || qty <= 0 || !state.jobForm.partCode) {
@@ -583,13 +718,138 @@ async function handleScheduleJob() {
   let currentSolution = state.solutionsByMonth[currentMonth];
   let wasAutoRescheduled = false;
   let autoRescheduleReason = '';
+  let splitChild = null;
+  const originalMonth = order.month;
+  const originalQty = order.quantity;
 
   // Auto-reschedule triggers:
   // - backlogged operations
   // - severe over-utilization (keeps the existing UX safe with cancel/revert)
-  const AUTO_OVERUTIL_THRESHOLD_PCT = 110;
+  const AUTO_OVERUTIL_THRESHOLD_PCT = 90;
   const autoGuardMax = 2;
   let autoGuard = 0;
+
+  const computeAssignedUtil = (solution, orderIds) => {
+    const assigned0 = solution.assignments.filter((a) => orderIds.includes(a.order_id));
+    const utilArr0 = computeUtilization({ machineSummary: solution.machine_summary });
+    const assignedMachines0 = [...new Set(assigned0.map((a) => a.machine))];
+    return assignedMachines0
+      .map((m) => {
+        const u = utilArr0.find((x) => x.machine === m);
+        return { machine: m, pct: (u?.regularUtil ?? 0) * 100 };
+      })
+      .sort((a, b) => b.pct - a.pct);
+  };
+
+  const solveMonthOrdersWithOverride = (month, overrideOrder) => {
+    const ordersForMonth = state.orders
+      .filter((o) => o.month === month)
+      .map((o) => ({ order_id: o.order_id, part_code: o.part_code, quantity: o.quantity }));
+    const idx = ordersForMonth.findIndex((o) => o.order_id === overrideOrder.order_id);
+    if (idx >= 0) ordersForMonth[idx] = { ...ordersForMonth[idx], quantity: overrideOrder.quantity };
+    else ordersForMonth.push({
+      order_id: overrideOrder.order_id,
+      part_code: overrideOrder.part_code,
+      quantity: overrideOrder.quantity
+    });
+
+    return solveScheduleGreedy({
+      machines: state.machines,
+      orders: ordersForMonth,
+      routingLong: ROUTING_LONG,
+      machineRoute: MACHINE_ROUTE,
+      times: TIMES,
+      allowBacklog: SOLVER_CONFIG.allowBacklog,
+      lambdaOT: SOLVER_CONFIG.lambdaOT,
+      lambdaBL: SOLVER_CONFIG.lambdaBL,
+      lambdaALT: SOLVER_CONFIG.lambdaALT,
+      primaryUtilizationCap: SOLVER_CONFIG.primaryUtilizationCap
+    });
+  };
+
+  const trySplitIntoNextMonth = async ({ month, reason }) => {
+    const nextM = nextMonthStr(month);
+    const baseQty = Number.parseFloat(order.quantity) || 0;
+    const minKeep = 1;
+    const maxKeep = Math.max(minKeep, Math.floor(baseQty));
+
+    let lo = minKeep;
+    let hi = maxKeep;
+    let bestKeep = 0;
+
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      const sol = solveMonthOrdersWithOverride(month, { ...order, quantity: mid });
+      const backlogged0 = sol.backlogged_operations.filter((b) => b.order_id === order.order_id);
+      const util0 = computeAssignedUtil(sol, [order.order_id]);
+      const severe0 = util0.some((x) => x.pct >= AUTO_OVERUTIL_THRESHOLD_PCT);
+
+      if (backlogged0.length === 0 && !severe0) {
+        bestKeep = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+
+    if (bestKeep <= 0 || bestKeep >= baseQty) return false;
+
+    const remainder = baseQty - bestKeep;
+    if (remainder <= 0.0001) return false;
+
+    const childId = Math.floor(Date.now() + Math.random() * 100000);
+    const childOrderId = `${order.order_id}-S${String(childId).slice(-4)}`;
+    const child = {
+      id: childId,
+      order_id: childOrderId,
+      part_code: order.part_code,
+      quantity: remainder,
+      month: nextM,
+      priority: order.priority,
+      createdAt: new Date().toISOString()
+    };
+
+    order.quantity = bestKeep;
+    state.orders = state.orders.map((o) => (o.id === order.id ? { ...o, quantity: bestKeep } : o));
+    try {
+      await apiUpdateOrder({
+        id: order.id,
+        order_id: order.order_id,
+        part_code: order.part_code,
+        quantity: order.quantity,
+        month: order.month,
+        priority: order.priority,
+        created_at: order.createdAt
+      });
+    } catch {
+      // ignore
+    }
+
+    state.orders = [...state.orders, child];
+    try {
+      await apiCreateOrder({
+        id: child.id,
+        order_id: child.order_id,
+        part_code: child.part_code,
+        quantity: child.quantity,
+        month: child.month,
+        priority: child.priority,
+        created_at: child.createdAt
+      });
+    } catch {
+      // ignore
+    }
+
+    solveForMonth(month);
+    solveForMonth(nextM);
+    saveData();
+    render();
+
+    wasAutoRescheduled = true;
+    autoRescheduleReason = reason;
+    splitChild = child;
+    return true;
+  };
 
   while (autoGuard < autoGuardMax) {
     autoGuard += 1;
@@ -609,10 +869,18 @@ async function handleScheduleJob() {
     const hasSevereOver = assignedMachineUtil0.some((x) => x.pct >= AUTO_OVERUTIL_THRESHOLD_PCT);
 
     if (!wasAutoRescheduled && (backlogged0.length > 0 || hasSevereOver)) {
-      wasAutoRescheduled = true;
-      autoRescheduleReason = backlogged0.length
+      const reason = backlogged0.length
         ? 'This order was moved because it could not be fully completed in the selected month.'
         : `This order was moved because it would severely overload one or more machines (≥${AUTO_OVERUTIL_THRESHOLD_PCT}%).`;
+
+      const splitOk = await trySplitIntoNextMonth({ month: currentMonth, reason });
+      if (splitOk) {
+        currentSolution = state.solutionsByMonth[currentMonth];
+        break;
+      }
+
+      wasAutoRescheduled = true;
+      autoRescheduleReason = reason;
 
       const nextMonth = nextMonthStr(currentMonth);
       await moveOrderToMonth(order.id, nextMonth);
@@ -625,6 +893,14 @@ async function handleScheduleJob() {
   }
 
   const nextMonth = nextMonthStr(order.month);
+  const scheduleLabel = splitChild
+    ? `${escapeHtml(monthLabel(originalMonth))} + ${escapeHtml(monthLabel(splitChild.month))}`
+    : escapeHtml(monthLabel(nextMonth));
+
+  const ref = splitRefInfo(order.order_id);
+  const refHtml = ref.isSplitChild
+    ? `<div class="small muted" style="margin-top: 6px;">Parent: <strong>${escapeHtml(ref.parentOrderId)}</strong></div>`
+    : '';
 
   const assigned = currentSolution.assignments.filter((a) => a.order_id === order.order_id);
   const backlogged = currentSolution.backlogged_operations.filter((b) => b.order_id === order.order_id);
@@ -644,13 +920,86 @@ async function handleScheduleJob() {
   let bodyHtml = `
     <div style="font-size: 16px; font-weight: 800; margin-bottom: 6px;">
       Order <strong>${escapeHtml(order.order_id)}</strong> 
-      ${wasAutoRescheduled ? `automatically moved to <strong>${escapeHtml(monthLabel(nextMonth))}</strong>` : `scheduled for <strong>${escapeHtml(monthLabel(order.month))}</strong>`}
+      ${wasAutoRescheduled ? `automatically scheduled for <strong>${scheduleLabel}</strong>` : `scheduled for <strong>${escapeHtml(monthLabel(order.month))}</strong>`}
     </div>
+    ${refHtml}
     ${wasAutoRescheduled ? `<div class="hint" style="margin-bottom: 12px; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); color: #fecaca;">
       ${escapeHtml(autoRescheduleReason || '')}
     </div>` : ''}
     <div class="muted" style="margin-bottom: 12px;">Part: <strong>${escapeHtml(order.part_code)}</strong> | Quantity: <strong>${order.quantity}</strong></div>
   `;
+
+  if (splitChild) {
+    solveForMonth(originalMonth);
+    solveForMonth(splitChild.month);
+    const sA = state.solutionsByMonth[originalMonth];
+    const sB = state.solutionsByMonth[splitChild.month];
+
+    const renderMonthBlock = (label, month, q, sol, orderIds) => {
+      const assigns = sol.assignments.filter((a) => orderIds.includes(a.order_id));
+      const bl = sol.backlogged_operations.filter((b) => orderIds.includes(b.order_id));
+      const utilRows = computeAssignedUtil(sol, orderIds)
+        .map((x) => `<div class="small"><span class="muted">${escapeHtml(x.machine)}:</span> <strong>${x.pct.toFixed(1)}%</strong></div>`)
+        .join('');
+
+      const assignHtml = assigns.length
+        ? assigns
+            .map(
+              (a) => `
+              <div class="item" style="padding: 10px;">
+                <div style="font-weight: 900; margin-bottom: 6px;">${escapeHtml(a.operation)} → ${escapeHtml(a.machine)} <span class="pill ${a.route_type === 'ALT' ? 'yellow' : 'green'}" style="margin-left: 8px;">${escapeHtml(
+                a.route_type
+              )}</span></div>
+                <div class="kv">
+                  <span>Total time (min)</span><strong style="color: rgba(34, 211, 238, 1);">${a.total_time_min.toFixed(2)}</strong>
+                  <span>Unit time (min/unit)</span><strong>${a.unit_time_min_per_unit.toFixed(2)}</strong>
+                  <span>Setup time (min)</span><strong>${a.setup_time_min.toFixed(2)}</strong>
+                </div>
+              </div>
+            `
+            )
+            .join('')
+        : '<div class="item" style="padding: 10px;">No assignment</div>';
+
+      const blHtml = bl.length
+        ? `<div class="stack">${bl
+            .map((b) => `<div class="item" style="padding: 10px; border-color: rgba(239, 68, 68, 0.35);"><strong>${escapeHtml(
+              b.operation
+            )}:</strong> ${escapeHtml(simplifyReason(b.reason))}</div>`)
+            .join('')}</div>`
+        : '';
+
+      return `
+        <div class="item" style="padding: 12px;">
+          <div style="font-weight: 900; margin-bottom: 6px; color: rgba(34, 211, 238, 1);">${escapeHtml(label)} — ${escapeHtml(
+        monthLabel(month)
+      )} (Qty ${Number(q).toFixed(0)})</div>
+          <div class="stack" style="gap: 10px;">
+            <div>
+              <div style="font-weight: 900; margin-bottom: 8px;">Assignments</div>
+              <div class="stack">${assignHtml}</div>
+            </div>
+            ${bl.length ? `<div>
+              <div style="font-weight: 900; margin-bottom: 8px; color: rgba(239, 68, 68, 1);">Backlogged</div>
+              ${blHtml}
+            </div>` : ''}
+            ${utilRows ? `<div>
+              <div style="font-weight: 900; margin-bottom: 8px;">Machine utilization impact</div>
+              <div class="stack" style="gap: 6px;">${utilRows}</div>
+            </div>` : ''}
+          </div>
+        </div>
+      `;
+    };
+
+    bodyHtml += `
+      <div style="font-weight: 900; margin-bottom: 8px;">Split schedule</div>
+      <div class="stack" style="gap: 12px;">
+        ${renderMonthBlock('Portion 1', originalMonth, order.quantity, sA, [order.order_id])}
+        ${renderMonthBlock('Portion 2', splitChild.month, splitChild.quantity, sB, [splitChild.order_id])}
+      </div>
+    `;
+  }
 
   if (assigned.length) {
     const rows = assigned
@@ -730,9 +1079,40 @@ async function handleScheduleJob() {
 
     if (cancelBtn) {
       cancelBtn.addEventListener('click', async () => {
-        await moveOrderToMonth(order.id, state.jobForm.month);
+        if (splitChild) {
+          try {
+            await apiDeleteOrder(splitChild.id);
+          } catch {
+            // ignore
+          }
+          state.orders = state.orders.filter((o) => o.id !== splitChild.id);
+
+          order.month = originalMonth;
+          order.quantity = originalQty;
+          state.orders = state.orders.map((o) => (o.id === order.id ? { ...o, month: originalMonth, quantity: originalQty } : o));
+          try {
+            await apiUpdateOrder({
+              id: order.id,
+              order_id: order.order_id,
+              part_code: order.part_code,
+              quantity: order.quantity,
+              month: order.month,
+              priority: order.priority,
+              created_at: order.createdAt
+            });
+          } catch {
+            // ignore
+          }
+
+          solveForMonth(originalMonth);
+          solveForMonth(splitChild.month);
+          saveData();
+          render();
+        } else {
+          await moveOrderToMonth(order.id, state.jobForm.month);
+        }
         closeModal();
-        alert(`Order reverted to ${monthLabel(state.jobForm.month)}`);
+        alert(`Order reverted to ${splitChild ? monthLabel(originalMonth) : monthLabel(state.jobForm.month)}`);
       });
     }
 
@@ -752,6 +1132,7 @@ async function handleScheduleJob() {
             <div style="font-size: 16px; font-weight: 800; margin-bottom: 6px;">Order <strong>${escapeHtml(
               order.order_id
             )}</strong> re-solved for <strong>${escapeHtml(monthLabel(order.month))}</strong></div>
+            ${splitRefInfo(order.order_id).isSplitChild ? `<div class="small muted" style="margin-bottom: 10px;">Parent: <strong>${escapeHtml(splitRefInfo(order.order_id).parentOrderId)}</strong></div>` : ''}
             <div class="muted" style="margin-bottom: 12px;">Mode: <strong>allow alts earlier</strong> (primary cap ${(
               rebalanceCap * 100
             ).toFixed(0)}%)</div>
@@ -837,6 +1218,7 @@ async function handleScheduleJob() {
             <div style="font-size: 16px; font-weight: 800; margin-bottom: 6px;">Order <strong>${escapeHtml(
               order.order_id
             )}</strong> moved to <strong>${escapeHtml(monthLabel(newMonth))}</strong></div>
+            ${splitRefInfo(order.order_id).isSplitChild ? `<div class="small muted" style="margin-bottom: 10px;">Parent: <strong>${escapeHtml(splitRefInfo(order.order_id).parentOrderId)}</strong></div>` : ''}
             <div class="muted" style="margin-bottom: 12px;">Part: <strong>${escapeHtml(
               order.part_code
             )}</strong> | Quantity: <strong>${order.quantity}</strong></div>
@@ -1166,11 +1548,12 @@ function showOrderDetailsModal(orderId) {
       <div style="font-size: 16px; font-weight: 800; margin-bottom: 6px;">Order <strong>${escapeHtml(
         order.order_id
       )}</strong></div>
+      ${splitRefInfo(order.order_id).isSplitChild ? `<div class="small muted" style="margin-bottom: 10px;">Parent: <strong>${escapeHtml(splitRefInfo(order.order_id).parentOrderId)}</strong></div>` : ''}
       <div class="muted" style="margin-bottom: 12px;">Part: <strong>${escapeHtml(
         order.part_code
       )}</strong> | Quantity: <strong>${order.quantity}</strong> | Month: <strong>${escapeHtml(
-      monthLabel(order.month)
-    )}</strong></div>
+        monthLabel(order.month)
+      )}</strong></div>
 
       <div style="font-weight: 900; margin-bottom: 8px; color: rgba(34, 211, 238, 1);">Assignments</div>
       <div class="stack">${assignsHtml}</div>
@@ -1186,8 +1569,38 @@ function showOrderDetailsModal(orderId) {
 
       <div style="font-weight: 900; margin-top: 14px; margin-bottom: 8px;">Machine utilization impact</div>
       <div class="stack" style="gap: 6px;">${utilHtml}</div>
+
+      ${backlogged.length ? `
+        <div style="font-weight: 900; margin-top: 14px; margin-bottom: 8px;">Actions</div>
+        <div class="actions" style="justify-content: flex-start; gap: 10px; flex-wrap: wrap;">
+          <button class="btn" type="button" id="splitBackloggedBtn">Split / Move to next month</button>
+        </div>
+      ` : ''}
     `
   });
+
+  if (backlogged.length) {
+    const btn = document.getElementById('splitBackloggedBtn');
+    if (btn) {
+      btn.addEventListener('click', async () => {
+        const ok = confirm('Try to split this order into next month to remove backlog? If splitting is not possible, it will be moved entirely.');
+        if (!ok) return;
+        btn.disabled = true;
+        btn.textContent = 'Optimizing...';
+        const res = await splitOrderIntoNextMonth(order.id, 90);
+        closeModal();
+        if (!res.ok) {
+          alert(res.reason || 'Unable to optimize this order');
+          return;
+        }
+        if (res.didSplit) {
+          alert(`Split created: kept ${res.keptQty} in ${monthLabel(order.month)}, moved ${res.childQty} to ${monthLabel(res.childMonth)} as ${res.childOrderId}`);
+        } else {
+          alert(`Order moved to ${monthLabel(res.movedTo)}`);
+        }
+      });
+    }
+  }
 }
 
 function showEditOrderModal(orderId) {
