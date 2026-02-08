@@ -59,7 +59,7 @@ function utilHeatStyle(pct) {
     // Keep user's exact hue logic for 0-90% (Yellow -> Green)
     hue = 50 + (120 - 50) * (p / 90);
     // Use HSLA directly for this range as requested
-    const bg = `hsla(${hue.toFixed(1)}, 85%, 45%, 0.32)`;
+    const bg = `hsla(${hue.toFixed(1)}, 85%, 45%, 0.50)`;
     const fg = `hsl(${hue.toFixed(1)}, 90%, 84%)`;
     return { bg, fg };
   } else {
@@ -68,7 +68,7 @@ function utilHeatStyle(pct) {
     const t = clamp((p - 90) / 30, 0, 1);
     rgb = mixRgb(ORANGE_RGB, RED_RGB, t);
     
-    const bg = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.35)`;
+    const bg = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.50)`;
     const fgRgb = mixRgb(rgb, [255, 255, 255], 0.75);
     const fg = `rgb(${fgRgb[0]}, ${fgRgb[1]}, ${fgRgb[2]})`;
     return { bg, fg };
@@ -142,6 +142,29 @@ async function apiUpdateOrder(order) {
 
 async function apiDeleteOrder(id) {
   await apiFetchJson(`./api/orders.php?id=${encodeURIComponent(String(id))}`, { method: 'DELETE' });
+}
+
+async function apiListOptimizeHistory({ limit = 30 } = {}) {
+  const data = await apiFetchJson(`./api/optimize_history.php?limit=${encodeURIComponent(String(limit))}`);
+  return Array.isArray(data?.history) ? data.history : [];
+}
+
+async function apiGetOptimizeHistory(id) {
+  return apiFetchJson(`./api/optimize_history.php?id=${encodeURIComponent(String(id))}`);
+}
+
+async function apiCreateOptimizeHistory(payload) {
+  return apiFetchJson('./api/optimize_history.php', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'create', ...payload })
+  });
+}
+
+async function apiRestoreOptimizeHistory({ id, version }) {
+  return apiFetchJson('./api/optimize_history.php', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'restore', id, version })
+  });
 }
 
 function sanityCheckEmbeddedData() {
@@ -2061,11 +2084,43 @@ async function handleGlobalReoptimize() {
     `;
   };
 
+  const buildUtilSnapshot = (ordersList) => {
+    const utilMap = {};
+    months.forEach((m) => {
+      const sol = solveScheduleGreedy({
+        machines: state.machines,
+        orders: ordersList
+          .filter((o) => o.month === m)
+          .map((o) => ({ order_id: o.order_id, part_code: o.part_code, quantity: o.quantity })),
+        routingLong: ROUTING_LONG,
+        machineRoute: MACHINE_ROUTE,
+        times: TIMES,
+        allowBacklog: SOLVER_CONFIG.allowBacklog,
+        lambdaOT: SOLVER_CONFIG.lambdaOT,
+        lambdaBL: SOLVER_CONFIG.lambdaBL,
+        lambdaALT: SOLVER_CONFIG.lambdaALT,
+        primaryUtilizationCap: SOLVER_CONFIG.primaryUtilizationCap
+      });
+      const uArr = computeUtilization({ machineSummary: sol.machine_summary });
+      utilMap[m] = {};
+      sol.machine_summary.forEach((ms) => {
+        const u = uArr.find((x) => x.machine === ms.machine);
+        utilMap[m][ms.machine] = (u?.regularUtil ?? 0) * 100;
+      });
+    });
+    return utilMap;
+  };
+
   renderModalHtml({
     title: 'Global Re-optimization Preview',
     titleColor: '#22d3ee',
     bodyHtml: `
       <div class="reopt-modal">
+        <div class="item" style="padding: 12px; margin-bottom: 12px;">
+          <div style="font-weight: 900; margin-bottom: 8px;">History</div>
+          <div id="reoptHistoryBox" class="small muted">Loading history...</div>
+        </div>
+
         <div class="small muted" style="margin-bottom: 12px;">
           The system has calculated a new distribution of orders across the year to minimize over-utilization and backlogs.
         </div>
@@ -2096,6 +2151,28 @@ async function handleGlobalReoptimize() {
     saveBtn.textContent = 'Saving...';
     
     try {
+      const beforeOrdersSnapshot = state.orders.map((o) => ({
+        id: o.id,
+        order_id: o.order_id,
+        part_code: o.part_code,
+        quantity: o.quantity,
+        month: o.month,
+        priority: o.priority,
+        created_at: o.createdAt
+      }));
+      const afterOrdersSnapshot = optimizedOrders.map((o) => ({
+        id: o.id,
+        order_id: o.order_id,
+        part_code: o.part_code,
+        quantity: o.quantity,
+        month: o.month,
+        priority: o.priority,
+        created_at: o.createdAt
+      }));
+
+      const beforeUtilSnapshot = buildUtilSnapshot(state.orders);
+      const afterUtilSnapshot = buildUtilSnapshot(optimizedOrders);
+
       const originalById = Object.fromEntries(state.orders.map((o) => [o.id, o]));
 
       const toUpdate = optimizedOrders.filter((opt) => {
@@ -2136,6 +2213,20 @@ async function handleGlobalReoptimize() {
       state.solutionsByMonth = {}; // Clear cache
       solveForMonth(state.currentMonth);
       saveData();
+
+      try {
+        await apiCreateOptimizeHistory({
+          note: 'Global re-optimization',
+          base_year: year,
+          before_orders_json: JSON.stringify(beforeOrdersSnapshot),
+          after_orders_json: JSON.stringify(afterOrdersSnapshot),
+          before_util_json: JSON.stringify(beforeUtilSnapshot),
+          after_util_json: JSON.stringify(afterUtilSnapshot)
+        });
+      } catch {
+        // ignore
+      }
+
       closeModal();
       render();
       alert(`Successfully re-optimized ${toUpdate.length + toCreate.length} orders across the year.`);
@@ -2146,6 +2237,80 @@ async function handleGlobalReoptimize() {
     }
   });
   actions.insertBefore(saveBtn, modalClose);
+
+  // History UI
+  const historyBox = document.getElementById('reoptHistoryBox');
+  apiListOptimizeHistory({ limit: 30 })
+    .then((rows) => {
+      if (!historyBox) return;
+      if (!rows.length) {
+        historyBox.innerHTML = 'No saved history yet.';
+        return;
+      }
+
+      const options = rows
+        .map((h) => {
+          const label = `${new Date(h.created_at).toLocaleString()}${h.note ? ` — ${h.note}` : ''}`;
+          return `<option value="${escapeHtml(String(h.id))}">${escapeHtml(label)}</option>`;
+        })
+        .join('');
+
+      historyBox.innerHTML = `
+        <div class="small muted" style="margin-bottom: 8px;">Restore a previously saved schedule snapshot.</div>
+        <div class="actions" style="justify-content: flex-start; gap: 10px; flex-wrap: wrap;">
+          <select id="reoptHistorySelect" style="min-width: 280px;">${options}</select>
+          <button class="btn" type="button" id="restoreBeforeBtn">Restore BEFORE</button>
+          <button class="btn danger" type="button" id="restoreAfterBtn">Restore AFTER</button>
+        </div>
+      `;
+
+      const getSelectedId = () => {
+        const sel = document.getElementById('reoptHistorySelect');
+        const v = sel ? Number(sel.value) : 0;
+        return Number.isFinite(v) ? v : 0;
+      };
+
+      const wireRestore = (btnId, version) => {
+        const btn = document.getElementById(btnId);
+        if (!btn) return;
+        btn.addEventListener('click', async () => {
+          const id = getSelectedId();
+          if (!id) return;
+          const ok = confirm(`Restore ${version.toUpperCase()} snapshot for this history entry? This will overwrite the current orders.`);
+          if (!ok) return;
+          btn.disabled = true;
+          btn.textContent = 'Restoring...';
+          try {
+            await apiRestoreOptimizeHistory({ id, version });
+            const rows2 = await apiListOrders();
+            state.orders = rows2.map((r) => ({
+              id: Number(r.id),
+              order_id: r.order_id,
+              part_code: r.part_code,
+              quantity: Number(r.quantity),
+              month: r.month,
+              priority: r.priority || 'normal',
+              createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString()
+            }));
+            state.solutionsByMonth = {};
+            solveForMonth(state.currentMonth);
+            render();
+            closeModal();
+            alert('Restored successfully');
+          } catch (e) {
+            alert(String(e?.message || 'Restore failed'));
+            btn.disabled = false;
+            btn.textContent = version === 'before' ? 'Restore BEFORE' : 'Restore AFTER';
+          }
+        });
+      };
+
+      wireRestore('restoreBeforeBtn', 'before');
+      wireRestore('restoreAfterBtn', 'after');
+    })
+    .catch(() => {
+      if (historyBox) historyBox.innerHTML = 'History unavailable (API not reachable).';
+    });
 }
 
 function syncFormToInputs() {
