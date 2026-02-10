@@ -15,14 +15,17 @@ $conn = db();
 
 require_auth();
 
+$me = $_SESSION['user'] ?? null;
+$me_username = is_array($me) ? (string)($me['username'] ?? '') : '';
+
 if ($method === 'GET') {
     $month = isset($_GET['month']) ? trim((string)$_GET['month']) : '';
 
     if ($month !== '') {
-        $stmt = $conn->prepare('SELECT id, order_id, part_code, quantity, month, priority, created_at, updated_at FROM orders WHERE month = ? ORDER BY created_at DESC');
+        $stmt = $conn->prepare('SELECT id, order_id, part_code, quantity, month, priority, created_by, created_at, updated_at FROM orders WHERE month = ? ORDER BY created_at DESC');
         $stmt->bind_param('s', $month);
     } else {
-        $stmt = $conn->prepare('SELECT id, order_id, part_code, quantity, month, priority, created_at, updated_at FROM orders ORDER BY created_at DESC');
+        $stmt = $conn->prepare('SELECT id, order_id, part_code, quantity, month, priority, created_by, created_at, updated_at FROM orders ORDER BY created_at DESC');
     }
 
     $stmt->execute();
@@ -54,8 +57,10 @@ if ($method === 'POST') {
     $created = $created_at !== '' ? $created_at : date('Y-m-d H:i:s');
     $updated = date('Y-m-d H:i:s');
 
-    $stmt = $conn->prepare('INSERT INTO orders (id, order_id, part_code, quantity, month, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-    $stmt->bind_param('issdssss', $id, $order_id, $part_code, $quantity, $month, $priority, $created, $updated);
+    $created_by = $me_username !== '' ? $me_username : 'unknown';
+
+    $stmt = $conn->prepare('INSERT INTO orders (id, order_id, part_code, quantity, month, priority, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    $stmt->bind_param('issdsssss', $id, $order_id, $part_code, $quantity, $month, $priority, $created_by, $created, $updated);
 
     if (!$stmt->execute()) {
         json_out(['error' => 'Insert failed', 'details' => $stmt->error], 500);

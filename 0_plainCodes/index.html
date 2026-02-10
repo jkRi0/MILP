@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Machine Scheduler</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20260210-4" />
     <script src="https://unpkg.com/lucide@latest"></script>
   </head>
   <body>
@@ -38,6 +38,15 @@
           <button class="tab" data-tab="calendar" type="button">
             <i data-lucide="calendar" aria-hidden="true"></i>
             <span>Calendar View</span>
+          </button>
+
+          <button class="tab" data-tab="account" type="button" id="accountTabBtn" style="display: none;">
+            <i data-lucide="user-cog" aria-hidden="true"></i>
+            <span>Account</span>
+          </button>
+
+          <button class="btn neutral" type="button" id="themeToggleBtn" style="padding: 10px 12px;">
+            Theme
           </button>
 
           <button class="btn neutral" type="button" id="logoutBtn" style="margin-left: auto; padding: 10px 12px; display: none;">
@@ -243,8 +252,27 @@
           </section>
 
           <section id="panel-forecast" class="panel" data-panel="forecast">
-            <h2 class="section-title">Monthly Utilization (Jan–Dec)</h2><br>
+            <div class="row-between" style="align-items: flex-end; margin-bottom: 20px;">
+              <div>
+                <h2 class="section-title" style="margin-bottom: 4px;">Monthly Utilization (Jan–Dec)</h2>
+                <p class="muted small">Switch year to view orders that spill into next year</p>
+              </div>
+              <div class="filter-group">
+                <label for="forecastYear" class="small muted">Year</label>
+                <select id="forecastYear" class="input-compact"></select>
+              </div>
+            </div>
             <div id="forecastStack" class="stack"></div>
+          </section>
+
+          <section id="panel-account" class="panel" data-panel="account">
+            <div class="row-between" style="align-items: flex-end; margin-bottom: 20px;">
+              <div>
+                <h2 class="section-title" style="margin-bottom: 4px;">Account Settings</h2>
+                <p class="muted small">Manage your account and users</p>
+              </div>
+            </div>
+            <div id="accountPanel" class="stack"></div>
           </section>
         </main>
       </div>
@@ -256,12 +284,12 @@
       </div>
     </div>
   
-    <script src="routingTimesFull.js"></script>
-    <script src="machineRouteFull.js"></script>
-    <script src="data.js"></script>
-    <script src="milpScheduler.js"></script>
-    <script src="metrics.js"></script>
-    <script src="uiController.js"></script>
-    <script src="app.js"></script>
+    <script src="routingTimesFull.js?v=20260210-2"></script>
+    <script src="machineRouteFull.js?v=20260210-2"></script>
+    <script src="data.js?v=20260210-2"></script>
+    <script src="milpScheduler.js?v=20260210-4"></script>
+    <script src="metrics.js?v=20260210-4"></script>
+    <script src="uiController.js?v=20260210-4"></script>
+    <script src="app.js?v=20260210-4"></script>
   </body>
 </html>

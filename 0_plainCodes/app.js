@@ -3,6 +3,17 @@ const STORAGE_KEYS = {
   solutionsByMonth: 'milp_solutions_by_month_v1'
 };
 
+const cloneDeep = (obj) => {
+  if (typeof globalThis.structuredClone === 'function') {
+    try {
+      return globalThis.structuredClone(obj);
+    } catch {
+      // fall through
+    }
+  }
+  return JSON.parse(JSON.stringify(obj));
+};
+
 const SOLVER_CONFIG = {
   allowBacklog: true,
   // Penalty weights from the study (can be exposed in UI later)
@@ -13,7 +24,7 @@ const SOLVER_CONFIG = {
 };
 
 const state = {
-  machines: structuredClone(MACHINES),
+  machines: cloneDeep(MACHINES),
   // Orders are what the user enters (Order ID, Part Code, Quantity).
   orders: [],
   user: null,
@@ -21,6 +32,7 @@ const state = {
   solutionsByMonth: {},
   activeTab: 'schedule',
   currentMonth: isoMonth(new Date()),
+  viewYear: new Date().getFullYear(),
   jobForm: {
     partCode: '',
     // NOTE: We keep the existing input label in HTML, but we interpret this as Quantity.
@@ -37,8 +49,19 @@ function clamp(n, a, b) {
   return Math.min(b, Math.max(a, n));
 }
 
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 function utilHeatStyle(pct) {
   const p = clamp(Number(pct) || 0, 0, 150);
+
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
 
   const lerp = (a, b, t) => a + (b - a) * t;
   const mixRgb = (c1, c2, t) => [
@@ -46,6 +69,20 @@ function utilHeatStyle(pct) {
     Math.round(lerp(c1[1], c2[1], t)),
     Math.round(lerp(c1[2], c2[2], t))
   ];
+
+  const rgbLuma = (c) => {
+    const [r, g, b] = c.map((x) => (Number(x) || 0) / 255);
+    const toLin = (u) => (u <= 0.04045 ? u / 12.92 : Math.pow((u + 0.055) / 1.055, 2.4));
+    const R = toLin(r);
+    const G = toLin(g);
+    const B = toLin(b);
+    return 0.2126 * R + 0.7152 * G + 0.0722 * B;
+  };
+
+  const pickFgForRgb = (rgb) => {
+    const L = rgbLuma(rgb);
+    return L > 0.52 ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.92)';
+  };
 
   // HSL colors converted to RGB for interpolation
   const GREEN_RGB = [34, 197, 94];   // Approx HSL(120, 85%, 45%)
@@ -58,19 +95,27 @@ function utilHeatStyle(pct) {
   if (p <= 90) {
     // Keep user's exact hue logic for 0-90% (Yellow -> Green)
     hue = 50 + (120 - 50) * (p / 90);
-    // Use HSLA directly for this range as requested
-    const bg = `hsla(${hue.toFixed(1)}, 85%, 45%, 0.50)`;
-    const fg = `hsl(${hue.toFixed(1)}, 90%, 84%)`;
+    // Use HSLA directly for this range
+    // Light theme: increase alpha + lightness for better contrast with dark text.
+    const L = isLight ? 62 : 45;
+    const A = isLight ? 0.65 : 0.50;
+    const bg = `hsla(${hue.toFixed(1)}, 85%, ${L}%, ${A})`;
+
+    // In light theme, the cell is bright, so use dark text.
+    // In dark theme, keep bright-tinted text.
+    const fg = isLight ? 'rgba(15, 23, 42, 0.92)' : `hsl(${hue.toFixed(1)}, 90%, 84%)`;
     return { bg, fg };
   } else {
     // For > 90%, use RGB interpolation to avoid the "hue-back-to-yellow" bug.
     // Transition: Green -> Orange -> Red
     const t = clamp((p - 90) / 30, 0, 1);
     rgb = mixRgb(ORANGE_RGB, RED_RGB, t);
-    
-    const bg = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.50)`;
-    const fgRgb = mixRgb(rgb, [255, 255, 255], 0.75);
-    const fg = `rgb(${fgRgb[0]}, ${fgRgb[1]}, ${fgRgb[2]})`;
+
+    const bgAlpha = isLight ? 0.70 : 0.50;
+    const bg = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${bgAlpha})`;
+
+    // Choose foreground based on luma to ensure readability in both themes.
+    const fg = isLight ? pickFgForRgb(rgb) : `rgb(${mixRgb(rgb, [255, 255, 255], 0.75).join(', ')})`;
     return { bg, fg };
   }
 }
@@ -80,6 +125,77 @@ function splitRefInfo(orderId) {
   const m = id.match(/^(.*?)-S\d+$/);
   if (!m) return { isSplitChild: false, parentOrderId: '' };
   return { isSplitChild: true, parentOrderId: m[1] };
+}
+
+function isCapacityBacklogReason(reason) {
+  const r = String(reason || '').toLowerCase();
+  if (!r) return false;
+  if (r.includes('missing time')) return false;
+  if (r.includes('no eligible machines')) return false;
+  if (r.includes('missing machine calendar')) return false;
+  if (r.includes('no feasible machine') && (r.includes('ot_max') || r.includes('a_min') || r.includes('exceeds'))) return true;
+  if (r.includes('exceeds') && (r.includes('a_min') || r.includes('ot_max'))) return true;
+  if (r.includes('ot_max')) return true;
+  if (r.includes('over by')) return true;
+  return false;
+}
+
+function monthYear(monthStr) {
+  const y = Number.parseInt(String(monthStr || '').slice(0, 4), 10);
+  return Number.isFinite(y) ? y : new Date().getFullYear();
+}
+
+function listAvailableYears() {
+  const ys = new Set();
+  ys.add(monthYear(state.currentMonth || isoMonth(new Date())));
+  ys.add(monthYear(state.jobForm?.month || isoMonth(new Date())));
+  for (const o of state.orders || []) {
+    if (o?.month) ys.add(monthYear(o.month));
+  }
+  const arr = [...ys].filter((y) => Number.isFinite(y)).sort((a, b) => a - b);
+  if (!arr.length) return [new Date().getFullYear()];
+
+  // Always offer at least current year and next year.
+  const cur = new Date().getFullYear();
+  arr.push(cur);
+  arr.push(cur + 1);
+  return [...new Set(arr)].sort((a, b) => a - b);
+}
+
+function monthsOfYear(year) {
+  const y = Number.parseInt(String(year), 10);
+  const yy = Number.isFinite(y) ? y : new Date().getFullYear();
+  return Array.from({ length: 12 }, (_, idx) => `${yy}-${String(idx + 1).padStart(2, '0')}`);
+}
+
+const supportsPassiveEvents = (() => {
+  let ok = false;
+  try {
+    const opts = Object.defineProperty({}, 'passive', {
+      get() {
+        ok = true;
+        return false;
+      }
+    });
+    window.addEventListener('test-passive', null, opts);
+    window.removeEventListener('test-passive', null, opts);
+  } catch {
+    ok = false;
+  }
+  return ok;
+})();
+
+function syncForecastYearSelect() {
+  const sel = document.getElementById('forecastYear');
+  if (!sel) return;
+
+  const years = listAvailableYears();
+  const current = Number.parseInt(String(state.viewYear), 10);
+  const next = Number.isFinite(current) ? current : years[0];
+
+  sel.innerHTML = years.map((y) => `<option value="${y}">${y}</option>`).join('');
+  sel.value = String(years.includes(next) ? next : years[0]);
+  state.viewYear = Number.parseInt(sel.value, 10);
 }
 
 async function apiFetchJson(url, options) {
@@ -120,11 +236,209 @@ async function apiLogout() {
   });
 }
 
+async function apiListUsers() {
+  return apiFetchJson('./api/users.php');
+}
+
+async function apiChangePassword({ current_password, new_password }) {
+  return apiFetchJson('./api/users.php', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'change_password', current_password, new_password })
+  });
+}
+
+async function apiCreateUser({ username, password }) {
+  return apiFetchJson('./api/users.php', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'create_user', username, password })
+  });
+}
+
+async function apiChangeUsername({ new_username }) {
+  return apiFetchJson('./api/users.php', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'change_username', new_username })
+  });
+}
+
 function setAuthUi(isAuthed) {
   const loginTabBtn = document.getElementById('loginTabBtn');
   const logoutBtn = document.getElementById('logoutBtn');
+  const accountTabBtn = document.getElementById('accountTabBtn');
   if (loginTabBtn) loginTabBtn.style.display = isAuthed ? 'none' : '';
   if (logoutBtn) logoutBtn.style.display = isAuthed ? '' : 'none';
+  if (accountTabBtn) accountTabBtn.style.display = isAuthed ? '' : 'none';
+}
+
+function renderAccount() {
+  const panel = document.getElementById('accountPanel');
+  if (!panel) return;
+
+  const me = state.user;
+  if (!me) {
+    panel.innerHTML = '<div class="muted">Please login to access account settings.</div>';
+    return;
+  }
+
+  const isAdmin = String(me.username || '') === 'admin';
+
+  panel.innerHTML = `
+    <div class="grid-2">
+      <div class="card">
+        <h2 class="card-title"><i data-lucide="key" aria-hidden="true"></i><span>Change Password</span></h2>
+        <div class="form">
+          <div class="field">
+            <label for="acctCurrentPassword">Current Password</label>
+            <input id="acctCurrentPassword" type="password" autocomplete="current-password" />
+          </div>
+          <div class="field">
+            <label for="acctNewPassword">New Password</label>
+            <input id="acctNewPassword" type="password" autocomplete="new-password" />
+          </div>
+          <button class="btn primary" type="button" id="acctChangePwBtn">Update Password</button>
+          <div id="acctChangePwMsg" class="small" style="display:none;"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title"><i data-lucide="user" aria-hidden="true"></i><span>Change Username</span></h2>
+        ${isAdmin
+          ? `<div class="muted small">The <strong>admin</strong> username is locked.</div>`
+          : `
+            <div class="form">
+              <div class="field">
+                <label for="acctNewUsernameSelf">New Username</label>
+                <input id="acctNewUsernameSelf" type="text" autocomplete="off" value="${escapeHtml(String(me.username || ''))}" />
+              </div>
+              <button class="btn" type="button" id="acctChangeUsernameBtn">Update Username</button>
+              <div id="acctChangeUsernameMsg" class="small" style="display:none;"></div>
+              <div class="small muted" style="margin-top: 8px;">You may need to logout/login if anything looks stale.</div>
+            </div>
+          `}
+      </div>
+
+      <div class="card">
+        <h2 class="card-title"><i data-lucide="users" aria-hidden="true"></i><span>User Management</span></h2>
+        ${isAdmin
+          ? `
+            <div class="form">
+              <div class="field">
+                <label for="acctNewUsername">New Username</label>
+                <input id="acctNewUsername" type="text" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label for="acctNewUserPassword">New User Password</label>
+                <input id="acctNewUserPassword" type="password" autocomplete="new-password" />
+              </div>
+              <button class="btn" type="button" id="acctCreateUserBtn">Create User</button>
+              <div id="acctCreateUserMsg" class="small" style="display:none;"></div>
+            </div>
+            <div style="height: 12px;"></div>
+            <div class="small muted" style="margin-bottom: 8px;">Existing users</div>
+            <div id="acctUsersList" class="stack" style="gap: 8px;"><div class="muted small">Loading…</div></div>
+          `
+          : `<div class="muted small">Only <strong>admin</strong> can create or list accounts.</div>`}
+      </div>
+    </div>
+  `;
+
+  const setMsg = (el, text, ok) => {
+    if (!el) return;
+    el.style.display = '';
+    el.style.color = ok ? 'rgba(134, 239, 172, 1)' : 'rgba(254, 202, 202, 1)';
+    el.textContent = text;
+  };
+
+  const pwBtn = document.getElementById('acctChangePwBtn');
+  const pwMsg = document.getElementById('acctChangePwMsg');
+  if (pwBtn) {
+    pwBtn.addEventListener('click', async () => {
+      const current_password = document.getElementById('acctCurrentPassword')?.value ?? '';
+      const new_password = document.getElementById('acctNewPassword')?.value ?? '';
+      pwBtn.disabled = true;
+      try {
+        await apiChangePassword({ current_password, new_password });
+        setMsg(pwMsg, 'Password updated.', true);
+        const a = document.getElementById('acctCurrentPassword');
+        const b = document.getElementById('acctNewPassword');
+        if (a) a.value = '';
+        if (b) b.value = '';
+      } catch (e) {
+        setMsg(pwMsg, String(e?.message || 'Failed to update password'), false);
+      } finally {
+        pwBtn.disabled = false;
+      }
+    });
+  }
+
+  const unameBtn = document.getElementById('acctChangeUsernameBtn');
+  const unameMsg = document.getElementById('acctChangeUsernameMsg');
+  if (unameBtn) {
+    unameBtn.addEventListener('click', async () => {
+      const new_username = (document.getElementById('acctNewUsernameSelf')?.value ?? '').trim();
+      unameBtn.disabled = true;
+      try {
+        const res = await apiChangeUsername({ new_username });
+        if (res?.user) {
+          state.user = res.user;
+        } else {
+          state.user = { ...(state.user || {}), username: new_username };
+        }
+        setMsg(unameMsg, 'Username updated.', true);
+        setAuthUi(true);
+      } catch (e) {
+        setMsg(unameMsg, String(e?.message || 'Failed to update username'), false);
+      } finally {
+        unameBtn.disabled = false;
+      }
+    });
+  }
+
+  const renderUsersList = async () => {
+    if (!isAdmin) return;
+    const list = document.getElementById('acctUsersList');
+    if (!list) return;
+    try {
+      const data = await apiListUsers();
+      const users = Array.isArray(data?.users) ? data.users : [];
+      if (!users.length) {
+        list.innerHTML = '<div class="muted small">No users found.</div>';
+        return;
+      }
+      list.innerHTML = users
+        .map((u) => `<div class="item" style="padding: 10px;"><strong>${escapeHtml(String(u.username || ''))}</strong><div class="small muted">Created: ${escapeHtml(String(u.created_at || ''))}</div></div>`)
+        .join('');
+    } catch (e) {
+      list.innerHTML = `<div class="small" style="color: rgba(254, 202, 202, 1);">${escapeHtml(
+        String(e?.message || 'Failed to load users')
+      )}</div>`;
+    }
+  };
+
+  const createBtn = document.getElementById('acctCreateUserBtn');
+  const createMsg = document.getElementById('acctCreateUserMsg');
+  if (createBtn) {
+    createBtn.addEventListener('click', async () => {
+      const username = (document.getElementById('acctNewUsername')?.value ?? '').trim();
+      const password = document.getElementById('acctNewUserPassword')?.value ?? '';
+      createBtn.disabled = true;
+      try {
+        await apiCreateUser({ username, password });
+        setMsg(createMsg, `User "${username}" created.`, true);
+        const a = document.getElementById('acctNewUsername');
+        const b = document.getElementById('acctNewUserPassword');
+        if (a) a.value = '';
+        if (b) b.value = '';
+        await renderUsersList();
+      } catch (e) {
+        setMsg(createMsg, String(e?.message || 'Failed to create user'), false);
+      } finally {
+        createBtn.disabled = false;
+      }
+    });
+  }
+
+  renderUsersList();
 }
 
 async function apiListOrders() {
@@ -238,6 +552,7 @@ function loadData() {
         quantity: Number(r.quantity),
         month: r.month,
         priority: r.priority || 'normal',
+        createdBy: r.created_by || r.createdBy || '',
         createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString()
       }));
       state.solutionsByMonth = {};
@@ -576,6 +891,19 @@ async function splitOrderIntoNextMonth(orderId, thresholdPct) {
   const order = state.orders.find((o) => o.id === orderId);
   if (!order) return { ok: false, reason: 'Order not found' };
 
+  const currentSol = state.solutionsByMonth[order.month];
+  const backloggedNow = currentSol?.backlogged_operations?.filter((b) => b.order_id === order.order_id) ?? [];
+  if (backloggedNow.length) {
+    const reasons = backloggedNow.map((b) => b.reason || '');
+    const capacity = reasons.some((x) => isCapacityBacklogReason(x));
+    if (!capacity) {
+      return {
+        ok: false,
+        reason: 'This backlog looks like a data/routing issue (e.g., missing time rows or no eligible machines). Splitting quantity will not fix it.'
+      };
+    }
+  }
+
   const month = order.month;
   const nextM = nextMonthStr(month);
   const baseQty = Number.parseFloat(order.quantity) || 0;
@@ -741,7 +1069,7 @@ async function handleScheduleJob() {
   let currentSolution = state.solutionsByMonth[currentMonth];
   let wasAutoRescheduled = false;
   let autoRescheduleReason = '';
-  let splitChild = null;
+  const splitChildren = [];
   const originalMonth = order.month;
   const originalQty = order.quantity;
 
@@ -749,7 +1077,7 @@ async function handleScheduleJob() {
   // - backlogged operations
   // - severe over-utilization (keeps the existing UX safe with cancel/revert)
   const AUTO_OVERUTIL_THRESHOLD_PCT = 90;
-  const autoGuardMax = 2;
+  const autoGuardMax = 8;
   let autoGuard = 0;
 
   const computeAssignedUtil = (solution, orderIds) => {
@@ -790,9 +1118,9 @@ async function handleScheduleJob() {
     });
   };
 
-  const trySplitIntoNextMonth = async ({ month, reason }) => {
+  const trySplitIntoNextMonth = async ({ orderObj, month, reason }) => {
     const nextM = nextMonthStr(month);
-    const baseQty = Number.parseFloat(order.quantity) || 0;
+    const baseQty = Number.parseFloat(orderObj.quantity) || 0;
     const minKeep = 1;
     const maxKeep = Math.max(minKeep, Math.floor(baseQty));
 
@@ -802,9 +1130,9 @@ async function handleScheduleJob() {
 
     while (lo <= hi) {
       const mid = Math.floor((lo + hi) / 2);
-      const sol = solveMonthOrdersWithOverride(month, { ...order, quantity: mid });
-      const backlogged0 = sol.backlogged_operations.filter((b) => b.order_id === order.order_id);
-      const util0 = computeAssignedUtil(sol, [order.order_id]);
+      const sol = solveMonthOrdersWithOverride(month, { ...orderObj, quantity: mid });
+      const backlogged0 = sol.backlogged_operations.filter((b) => b.order_id === orderObj.order_id);
+      const util0 = computeAssignedUtil(sol, [orderObj.order_id]);
       const severe0 = util0.some((x) => x.pct >= AUTO_OVERUTIL_THRESHOLD_PCT);
 
       if (backlogged0.length === 0 && !severe0) {
@@ -821,28 +1149,28 @@ async function handleScheduleJob() {
     if (remainder <= 0.0001) return false;
 
     const childId = Math.floor(Date.now() + Math.random() * 100000);
-    const childOrderId = `${order.order_id}-S${String(childId).slice(-4)}`;
+    const childOrderId = `${orderObj.order_id}-S${String(childId).slice(-4)}`;
     const child = {
       id: childId,
       order_id: childOrderId,
-      part_code: order.part_code,
+      part_code: orderObj.part_code,
       quantity: remainder,
       month: nextM,
-      priority: order.priority,
+      priority: orderObj.priority,
       createdAt: new Date().toISOString()
     };
 
-    order.quantity = bestKeep;
-    state.orders = state.orders.map((o) => (o.id === order.id ? { ...o, quantity: bestKeep } : o));
+    orderObj.quantity = bestKeep;
+    state.orders = state.orders.map((o) => (o.id === orderObj.id ? { ...o, quantity: bestKeep } : o));
     try {
       await apiUpdateOrder({
-        id: order.id,
-        order_id: order.order_id,
-        part_code: order.part_code,
-        quantity: order.quantity,
-        month: order.month,
-        priority: order.priority,
-        created_at: order.createdAt
+        id: orderObj.id,
+        order_id: orderObj.order_id,
+        part_code: orderObj.part_code,
+        quantity: orderObj.quantity,
+        month: orderObj.month,
+        priority: orderObj.priority,
+        created_at: orderObj.createdAt
       });
     } catch {
       // ignore
@@ -870,15 +1198,19 @@ async function handleScheduleJob() {
 
     wasAutoRescheduled = true;
     autoRescheduleReason = reason;
-    splitChild = child;
-    return true;
+    splitChildren.push(child);
+    return child;
   };
+
+  let currentOrder = order;
+  currentMonth = currentOrder.month;
+  currentSolution = state.solutionsByMonth[currentMonth];
 
   while (autoGuard < autoGuardMax) {
     autoGuard += 1;
 
-    const assigned0 = currentSolution.assignments.filter((a) => a.order_id === order.order_id);
-    const backlogged0 = currentSolution.backlogged_operations.filter((b) => b.order_id === order.order_id);
+    const assigned0 = currentSolution.assignments.filter((a) => a.order_id === currentOrder.order_id);
+    const backlogged0 = currentSolution.backlogged_operations.filter((b) => b.order_id === currentOrder.order_id);
 
     const utilArr0 = computeUtilization({ machineSummary: currentSolution.machine_summary });
     const assignedMachines0 = [...new Set(assigned0.map((a) => a.machine))];
@@ -891,33 +1223,42 @@ async function handleScheduleJob() {
 
     const hasSevereOver = assignedMachineUtil0.some((x) => x.pct >= AUTO_OVERUTIL_THRESHOLD_PCT);
 
-    if (!wasAutoRescheduled && (backlogged0.length > 0 || hasSevereOver)) {
+    const backlogCapacity = backlogged0.some((b) => isCapacityBacklogReason(b.reason));
+
+    if ((backlogged0.length > 0 && backlogCapacity) || hasSevereOver) {
       const reason = backlogged0.length
         ? 'This order was moved because it could not be fully completed in the selected month.'
         : `This order was moved because it would severely overload one or more machines (≥${AUTO_OVERUTIL_THRESHOLD_PCT}%).`;
 
-      const splitOk = await trySplitIntoNextMonth({ month: currentMonth, reason });
-      if (splitOk) {
+      const child = await trySplitIntoNextMonth({ orderObj: currentOrder, month: currentMonth, reason });
+      if (child) {
+        currentOrder = child;
+        currentMonth = child.month;
         currentSolution = state.solutionsByMonth[currentMonth];
-        break;
+        continue;
       }
 
       wasAutoRescheduled = true;
       autoRescheduleReason = reason;
 
       const nextMonth = nextMonthStr(currentMonth);
-      await moveOrderToMonth(order.id, nextMonth);
+      await moveOrderToMonth(currentOrder.id, nextMonth);
       currentMonth = nextMonth;
       currentSolution = state.solutionsByMonth[currentMonth];
       continue;
+    }
+
+    if (backlogged0.length > 0 && !backlogCapacity) {
+      autoRescheduleReason = 'This order is backlogged due to missing/invalid routing or time data (not capacity). Fix the data first; splitting or moving will not help.';
+      break;
     }
 
     break;
   }
 
   const nextMonth = nextMonthStr(order.month);
-  const scheduleLabel = splitChild
-    ? `${escapeHtml(monthLabel(originalMonth))} + ${escapeHtml(monthLabel(splitChild.month))}`
+  const scheduleLabel = splitChildren.length
+    ? `${escapeHtml(monthLabel(originalMonth))} + ${escapeHtml(monthLabel(splitChildren[splitChildren.length - 1].month))}`
     : escapeHtml(monthLabel(nextMonth));
 
   const ref = splitRefInfo(order.order_id);
@@ -925,8 +1266,9 @@ async function handleScheduleJob() {
     ? `<div class="small muted" style="margin-top: 6px;">Parent: <strong>${escapeHtml(ref.parentOrderId)}</strong></div>`
     : '';
 
-  const assigned = currentSolution.assignments.filter((a) => a.order_id === order.order_id);
-  const backlogged = currentSolution.backlogged_operations.filter((b) => b.order_id === order.order_id);
+  const displayOrderId = splitChildren.length ? splitChildren[splitChildren.length - 1].order_id : order.order_id;
+  const assigned = currentSolution.assignments.filter((a) => a.order_id === displayOrderId);
+  const backlogged = currentSolution.backlogged_operations.filter((b) => b.order_id === displayOrderId);
 
   const utilArr = computeUtilization({ machineSummary: currentSolution.machine_summary });
   const assignedMachines = [...new Set(assigned.map((a) => a.machine))];
@@ -952,63 +1294,61 @@ async function handleScheduleJob() {
     <div class="muted" style="margin-bottom: 12px;">Part: <strong>${escapeHtml(order.part_code)}</strong> | Quantity: <strong>${order.quantity}</strong></div>
   `;
 
-  if (splitChild) {
-    solveForMonth(originalMonth);
-    solveForMonth(splitChild.month);
-    const sA = state.solutionsByMonth[originalMonth];
-    const sB = state.solutionsByMonth[splitChild.month];
+  if (splitChildren.length) {
+    const chain = [
+      { label: 'Portion 1', month: originalMonth, qty: order.quantity, orderIds: [order.order_id] },
+      ...splitChildren.map((ch, idx) => ({
+        label: `Portion ${idx + 2}`,
+        month: ch.month,
+        qty: ch.quantity,
+        orderIds: [ch.order_id]
+      }))
+    ];
+
+    for (const c of chain) solveForMonth(c.month);
 
     const renderMonthBlock = (label, month, q, sol, orderIds) => {
       const assigns = sol.assignments.filter((a) => orderIds.includes(a.order_id));
       const bl = sol.backlogged_operations.filter((b) => orderIds.includes(b.order_id));
-      const utilRows = computeAssignedUtil(sol, orderIds)
-        .map((x) => `<div class="small"><span class="muted">${escapeHtml(x.machine)}:</span> <strong>${x.pct.toFixed(1)}%</strong></div>`)
-        .join('');
 
       const assignHtml = assigns.length
         ? assigns
             .map(
-              (a) => `
-              <div class="item" style="padding: 10px;">
-                <div style="font-weight: 900; margin-bottom: 6px;">${escapeHtml(a.operation)} → ${escapeHtml(a.machine)} <span class="pill ${a.route_type === 'ALT' ? 'yellow' : 'green'}" style="margin-left: 8px;">${escapeHtml(
-                a.route_type
-              )}</span></div>
-                <div class="kv">
-                  <span>Total time (min)</span><strong style="color: rgba(34, 211, 238, 1);">${a.total_time_min.toFixed(2)}</strong>
-                  <span>Unit time (min/unit)</span><strong>${a.unit_time_min_per_unit.toFixed(2)}</strong>
-                  <span>Setup time (min)</span><strong>${a.setup_time_min.toFixed(2)}</strong>
-                </div>
-              </div>
-            `
+              (a) =>
+                `<div class="small"><span class="muted">${escapeHtml(a.operation)}:</span> <strong>${escapeHtml(
+                  a.machine
+                )}</strong> — <strong style="color: rgba(34, 211, 238, 1);">${a.total_time_min.toFixed(
+                  1
+                )} min</strong></div>`
             )
             .join('')
-        : '<div class="item" style="padding: 10px;">No assignment</div>';
+        : `<div class="small" style="color: rgba(239, 68, 68, 1);">No assignment (backlogged)</div>`;
 
       const blHtml = bl.length
-        ? `<div class="stack">${bl
-            .map((b) => `<div class="item" style="padding: 10px; border-color: rgba(239, 68, 68, 0.35);"><strong>${escapeHtml(
-              b.operation
-            )}:</strong> ${escapeHtml(simplifyReason(b.reason))}</div>`)
-            .join('')}</div>`
+        ? bl
+            .map(
+              (b) =>
+                `<div class="small" style="color: rgba(239, 68, 68, 1);"><strong>${escapeHtml(
+                  b.operation
+                )}:</strong> ${escapeHtml(simplifyReason(b.reason))}</div>`
+            )
+            .join('')
         : '';
 
       return `
-        <div class="item" style="padding: 12px;">
-          <div style="font-weight: 900; margin-bottom: 6px; color: rgba(34, 211, 238, 1);">${escapeHtml(label)} — ${escapeHtml(
-        monthLabel(month)
-      )} (Qty ${Number(q).toFixed(0)})</div>
-          <div class="stack" style="gap: 10px;">
+        <div class="item" style="padding: 10px;">
+          <div style="font-weight: 900; margin-bottom: 6px;">${escapeHtml(label)} — ${escapeHtml(
+            monthLabel(month)
+          )}</div>
+          <div class="muted small" style="margin-bottom: 10px;">Quantity: <strong>${q}</strong></div>
+          <div class="stack" style="gap: 8px;">
             <div>
-              <div style="font-weight: 900; margin-bottom: 8px;">Assignments</div>
-              <div class="stack">${assignHtml}</div>
+              <div style="font-weight: 900; margin-bottom: 6px;">Assignments</div>
+              <div class="stack" style="gap: 6px;">${assignHtml}</div>
             </div>
-            ${bl.length ? `<div>
-              <div style="font-weight: 900; margin-bottom: 8px; color: rgba(239, 68, 68, 1);">Backlogged</div>
-              ${blHtml}
-            </div>` : ''}
-            ${utilRows ? `<div>
-              <div style="font-weight: 900; margin-bottom: 8px;">Machine utilization impact</div>
-              <div class="stack" style="gap: 6px;">${utilRows}</div>
+            ${blHtml ? `<div>
+              <div style="font-weight: 900; margin-bottom: 6px; color: rgba(239, 68, 68, 1);">Backlogged</div>
+              <div class="stack" style="gap: 6px;">${blHtml}</div>
             </div>` : ''}
           </div>
         </div>
@@ -1018,8 +1358,9 @@ async function handleScheduleJob() {
     bodyHtml += `
       <div style="font-weight: 900; margin-bottom: 8px;">Split schedule</div>
       <div class="stack" style="gap: 12px;">
-        ${renderMonthBlock('Portion 1', originalMonth, order.quantity, sA, [order.order_id])}
-        ${renderMonthBlock('Portion 2', splitChild.month, splitChild.quantity, sB, [splitChild.order_id])}
+        ${chain
+          .map((c) => renderMonthBlock(c.label, c.month, c.qty, state.solutionsByMonth[c.month], c.orderIds))
+          .join('')}
       </div>
     `;
   }
@@ -1102,13 +1443,15 @@ async function handleScheduleJob() {
 
     if (cancelBtn) {
       cancelBtn.addEventListener('click', async () => {
-        if (splitChild) {
-          try {
-            await apiDeleteOrder(splitChild.id);
-          } catch {
-            // ignore
+        if (splitChildren.length) {
+          for (const ch of splitChildren) {
+            try {
+              await apiDeleteOrder(ch.id);
+            } catch {
+              // ignore
+            }
+            state.orders = state.orders.filter((o) => o.id !== ch.id);
           }
-          state.orders = state.orders.filter((o) => o.id !== splitChild.id);
 
           order.month = originalMonth;
           order.quantity = originalQty;
@@ -1128,14 +1471,16 @@ async function handleScheduleJob() {
           }
 
           solveForMonth(originalMonth);
-          solveForMonth(splitChild.month);
+          for (const ch of splitChildren) {
+            solveForMonth(ch.month);
+          }
           saveData();
           render();
         } else {
           await moveOrderToMonth(order.id, state.jobForm.month);
         }
         closeModal();
-        alert(`Order reverted to ${splitChild ? monthLabel(originalMonth) : monthLabel(state.jobForm.month)}`);
+        alert(`Order reverted to ${splitChildren.length ? monthLabel(originalMonth) : monthLabel(state.jobForm.month)}`);
       });
     }
 
@@ -1453,7 +1798,7 @@ function renderCalendar() {
     });
 
     if (hasOverUtilizedMachine) {
-      wrap.style.borderColor = 'rgba(206, 50, 50, 1)';
+      wrap.style.borderColor = 'var(--over-outline)';
       wrap.style.borderWidth = '2px';
     }
 
@@ -1576,7 +1921,7 @@ function showOrderDetailsModal(orderId) {
         order.part_code
       )}</strong> | Quantity: <strong>${order.quantity}</strong> | Month: <strong>${escapeHtml(
         monthLabel(order.month)
-      )}</strong></div>
+      )}</strong>${order.createdBy ? ` | Created by: <strong>${escapeHtml(order.createdBy)}</strong>` : ''}</div>
 
       <div style="font-weight: 900; margin-bottom: 8px; color: rgba(34, 211, 238, 1);">Assignments</div>
       <div class="stack">${assignsHtml}</div>
@@ -1946,11 +2291,7 @@ function renderForecast() {
   const stack = document.getElementById('forecastStack');
   stack.innerHTML = '';
 
-  const year = Number.parseInt(String(state.currentMonth || isoMonth(new Date())).slice(0, 4), 10);
-  const months = Array.from({ length: 12 }, (_, idx) => {
-    const m = idx + 1;
-    return `${year}-${String(m).padStart(2, '0')}`;
-  });
+  const months = monthsOfYear(state.viewYear);
   const monthLabels = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 
   const machineNames = state.machines.map((m) => m.name);
@@ -1970,14 +2311,13 @@ function renderForecast() {
   const wrap = document.createElement('div');
   wrap.className = 'forecast-table-wrap';
 
-  const reoptimizeBtn = document.createElement('button');
-  reoptimizeBtn.className = 'btn primary';
-  reoptimizeBtn.style.marginBottom = '20px';
-  reoptimizeBtn.innerHTML = '<i data-lucide="refresh-cw" style="width:16px;height:16px;margin-right:8px;"></i> Re-optimize Load';
-  reoptimizeBtn.addEventListener('click', handleGlobalReoptimize);
-  stack.appendChild(reoptimizeBtn);
-
   wrap.innerHTML = `
+    <div style="margin-bottom: 20px;">
+      <button class="btn primary" type="button" id="forecastReoptBtn" style="width: 100%;">
+        <i data-lucide="refresh-cw" style="width:16px;height:16px;margin-right:8px;"></i>
+        Re-optimize Load
+      </button>
+    </div>
     <div class="util-legend">
       <div class="small muted">Legend</div>
       <div class="util-legend-items">
@@ -2024,14 +2364,16 @@ function renderForecast() {
   );
 
   stack.appendChild(wrap);
+
+  const reoptBtn = document.getElementById('forecastReoptBtn');
+  if (reoptBtn) reoptBtn.addEventListener('click', handleGlobalReoptimize);
 }
 
 async function handleGlobalReoptimize() {
   const optimizedOrders = solveGlobalReoptimization(state.orders);
   
   // Calculate preview data
-  const year = Number.parseInt(String(state.currentMonth || isoMonth(new Date())).slice(0, 4), 10);
-  const months = Array.from({ length: 12 }, (_, idx) => `${year}-${String(idx + 1).padStart(2, '0')}`);
+  const months = monthsOfYear(state.viewYear);
   const machineNames = state.machines.map((m) => m.name);
   const monthLabels = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 
@@ -2258,7 +2600,7 @@ async function handleGlobalReoptimize() {
       historyBox.innerHTML = `
         <div class="small muted" style="margin-bottom: 8px;">Restore a previously saved schedule snapshot.</div>
         <div class="actions" style="justify-content: flex-start; gap: 10px; flex-wrap: wrap;">
-          <select id="reoptHistorySelect" style="min-width: 280px;">${options}</select>
+          <select id="reoptHistorySelect" style="width: 100%; max-width: 100%;">${options}</select>
           <button class="btn" type="button" id="restoreBeforeBtn">Restore BEFORE</button>
           <button class="btn danger" type="button" id="restoreAfterBtn">Restore AFTER</button>
         </div>
@@ -2324,12 +2666,15 @@ function syncFormToInputs() {
 function render() {
   renderScheduleFormDerived();
 
+  syncForecastYearSelect();
+
   document.getElementById('dashboardMonth').value = state.currentMonth;
   document.getElementById('calendarMonth').value = state.currentMonth;
 
   if (state.activeTab === 'dashboard') renderDashboard();
   if (state.activeTab === 'calendar') renderCalendar();
   if (state.activeTab === 'forecast') renderForecast();
+  if (state.activeTab === 'account') renderAccount();
 
   renderIcons();
 }
@@ -2338,6 +2683,52 @@ function wireEvents() {
   document.querySelectorAll('.tab').forEach((btn) => {
     btn.addEventListener('click', () => setActiveTab(btn.dataset.tab));
   });
+
+  const themeBtn = document.getElementById('themeToggleBtn');
+  if (themeBtn) {
+    const setThemeBtnLabel = () => {
+      const t = document.documentElement.getAttribute('data-theme') || 'dark';
+      themeBtn.textContent = t === 'light' ? 'Dark' : 'Light';
+    };
+    setThemeBtnLabel();
+
+    let lastThemeToggleAt = 0;
+    const doToggleTheme = (e) => {
+      if (e && typeof e.preventDefault === 'function') e.preventDefault();
+      if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+
+      // Debounce to avoid double-fire on mobile (touch + click).
+      const now = Date.now();
+      if (now - lastThemeToggleAt < 350) return;
+      lastThemeToggleAt = now;
+
+      const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+      const next = cur === 'light' ? 'dark' : 'light';
+      if (next === 'dark') {
+        document.documentElement.removeAttribute('data-theme');
+      } else {
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+      try {
+        localStorage.setItem('theme', next);
+      } catch {
+        // ignore
+      }
+      setThemeBtnLabel();
+      render();
+      renderIcons();
+    };
+
+    // Prefer pointer events when available; fall back for older mobile browsers.
+    // Some older mobile browsers throw if an options object is passed.
+    const opts = supportsPassiveEvents ? { passive: false } : false;
+    if (typeof window.PointerEvent !== 'undefined') {
+      themeBtn.addEventListener('pointerup', doToggleTheme, opts);
+    } else {
+      themeBtn.addEventListener('touchend', doToggleTheme, opts);
+    }
+    themeBtn.addEventListener('click', doToggleTheme);
+  }
 
   const loginBtn = document.getElementById('loginBtn');
   if (loginBtn) {
@@ -2402,6 +2793,15 @@ function wireEvents() {
     render();
   });
 
+  const forecastYear = document.getElementById('forecastYear');
+  if (forecastYear) {
+    forecastYear.addEventListener('change', (e) => {
+      const y = Number.parseInt(String(e.target.value), 10);
+      if (Number.isFinite(y)) state.viewYear = y;
+      render();
+    });
+  }
+
   document.getElementById('modalOverlay').addEventListener('click', (e) => {
     if (e.target && e.target.id === 'modalOverlay') {
       closeModal();
@@ -2414,6 +2814,14 @@ function wireEvents() {
 }
 
 function init() {
+  try {
+    const t = localStorage.getItem('theme');
+    if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    else document.documentElement.removeAttribute('data-theme');
+  } catch {
+    // ignore
+  }
+
   apiMe()
     .then((d) => {
       const authed = !!d?.user;
