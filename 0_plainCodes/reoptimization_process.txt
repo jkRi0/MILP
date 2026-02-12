@@ -1,0 +1,297 @@
+MILP Scheduling / Re-scheduling Process (Browser Greedy Approx)
+===========================================================
+
+1) Overview
+-----------
+This project does not run a true MILP optimizer in the browser. Instead, it uses a greedy heuristic scheduler
+that preserves the *same* objective terms and penalty structure as the MILP study/model. The greedy solver
+outputs an MILP-style objective approximation, which is then used to:
+- compute utilization and backlog signals
+- drive re-scheduling actions (local split/move, and global re-optimization)
+- render utilization dashboards/heatmaps
+
+Key files/functions:
+- 0_plainCodes/milpScheduler.js
+  - solveScheduleGreedy(...): greedy schedule builder (the MILP-like core)
+  - objectiveApprox: MILP-style objective approximation (imbalance + penalties)
+- 0_plainCodes/app.js
+  - solveForMonth(month): caches a schedule solution for the month
+  - computeUtilization({ machineSummary }): converts machine summary minutes into utilization %
+  - renderDashboard(): utilization dashboard machine cards (uses solveForMonth + computeUtilization)
+  - renderForecast(): Monthly Utilization heatmap table
+  - solveGlobalReoptimization(allOrders): global redistribution logic (move/split orders)
+  - handleGlobalReoptimize(): preview modal (before/after) and Save Changes flow
+  - splitOrderIntoNextMonth(orderId, thresholdPct): local split/move helper
+
+
+2) Inputs used by the solver
+----------------------------
+solveScheduleGreedy(...) consumes:
+- machines: monthly capacity calendar per machine
+  - each machine provides A_min (regular minutes) and OT_max (max overtime minutes)
+- orders: array of { order_id, part_code, quantity }
+- routingLong (ROUTING_LONG): eligible machines per operation (alternatives)
+- machineRoute (MACHINE_ROUTE): preferred staged routing by machine group (multi-step routes)
+- times (TIMES): processing and setup times per part/operation/machine
+- allowBacklog: whether infeasible ops become backlogged instead of throwing
+- lambdaOT, lambdaBL, lambdaALT: penalty weights
+- primaryUtilizationCap: threshold used to discourage choosing alternative routes unless primaries are queued
+
+
+3) How the MILP-style objective is computed (core MILP computation)
+-----------------------------------------------------------------
+Inside 0_plainCodes/milpScheduler.js -> solveScheduleGreedy(...):
+
+A) Build operation-jobs (J)
+- For each order, build the required operation list.
+- Prefer MACHINE_ROUTE stages if available (multi-step consumption across processes).
+- Otherwise, fall back to ROUTING_LONG operations.
+
+B) Greedy assignment (x_ij approximation)
+- For each operation-job j, choose a feasible machine i among eligible machines.
+- Feasibility is constrained by monthly capacity:
+  - U_i <= A_i + OT_max_i
+- Candidate scoring approximates MILP objective structure:
+  - balance proxy (deviation from current average load)
+  - + lambdaALT * pi_ij (penalty for alternative routes)
+  - + lambdaOT  * overtimeNeeded
+- If no feasible machine exists and allowBacklog=true:
+  - record backlogged_operations[] with reason
+
+C) Machine summary (U_i and OT_i)
+- machine_summary contains, per machine:
+  - U_min: utilized minutes
+  - OT_min: overtime minutes = min(OT_max, max(0, U_min - A_min))
+  - A_min, OT_max
+  - over_regular_time flag
+
+D) Imbalance terms (D+ and D-)
+- Compute U_avg (average utilization minutes across machines)
+- For each machine i:
+  - diff = U_i - U_avg
+  - D_plus  = max(0, diff)
+  - D_minus = max(0, -diff)
+
+E) MILP-style objective approximation (objectiveApprox)
+- Compute totals:
+  - totalImbalance = Σ(D_plus + D_minus)
+  - totalOT        = Σ(OT_min)
+  - totalBacklog   = count(backlogged_operations)
+  - totalAlt       = count(assignments where route_type == 'ALT')
+
+- Then:
+  objectiveApprox ≈ totalImbalance
+                 + lambdaOT * totalOT
+                 + lambdaBL * totalBacklog
+                 + lambdaALT * totalAlt
+
+This objectiveApprox is the primary "MILP computation" available in this browser implementation.
+
+
+4) Utilization computation and visualization
+--------------------------------------------
+- app.js -> computeUtilization({ machineSummary }) converts U_min, A_min (and overtime policy) into utilization.
+- app.js -> utilHeatStyle(pct) maps utilization % into a background/foreground color for heatmaps and bars.
+
+Where it is used:
+- renderForecast(): Monthly Utilization table (machine x month)
+- renderDashboard(): machine cards and progress bars
+- handleGlobalReoptimize(): before/after utilization preview tables
+
+
+5) Local re-scheduling (split/move a single order)
+--------------------------------------------------
+Function:
+- app.js -> splitOrderIntoNextMonth(orderId, thresholdPct)
+
+Process:
+- Inspect current month schedule and backlog reasons.
+- If backlog exists but looks like data/routing issues (missing time rows, no eligible machines), do not split.
+- Otherwise, attempt to keep as much quantity as possible in the current month while staying under a threshold
+  (or remove backlog), then move the remainder to next month as a split-child order.
+
+
+6) Global re-optimization (re-distribute across months)
+------------------------------------------------------
+Function:
+- app.js -> solveGlobalReoptimization(allOrders)
+
+High-level goal:
+- reduce backlogs and over-utilization by moving/splitting only the orders that contribute to problematic months,
+  while keeping other orders stable in their original month.
+
+Core steps:
+A) Define horizon months
+- Uses monthsOfYear(baseYear) and monthsOfYear(baseYear+1) to allow spillover beyond December.
+
+B) Evaluate which months are "bad"
+- For each month, run solveScheduleGreedy(...) on orders in that month.
+- Mark month as bad if:
+  - backlogCount > 0
+  - OR maxRegularUtil > primaryUtilizationCap
+
+C) Determine which orders are "movable" from a bad month
+- From the same solveScheduleGreedy(...) result:
+  - Identify machines whose regular utilization exceeds the cap.
+  - Mark orders as movable if they:
+    - have assignments on any over-cap machine, OR
+    - have capacity-related backlogs (checked with isCapacityBacklogReason(reason)).
+
+D) Freeze non-movable orders
+- Orders not considered movable are kept in their original month.
+
+E) Phase 1: whole-order month selection for movable orders
+- For each movable order (in stable priority/date order):
+  - try candidate months >= original month
+  - evaluate each candidate month by running solveScheduleGreedy on (current optimizedOrders for that month + order)
+  - pick the best month based on feasibility signals (backlog and max utilization), plus a stability penalty.
+
+Note: The scoring can be configured to rely on MILP-style objectiveApprox from solveScheduleGreedy,
+but it must be gated by the stability rules (only move orders from bad months / contributing orders).
+
+F) Phase 2: conservative splitting
+- Iterate months in order; if a month still exceeds the cap:
+  - pick a split candidate among orders that are movable from their *origin month*
+  - binary search the largest quantity to keep so that the month meets the cap
+  - move the remainder to the next month as a split-child
+
+
+7) Global re-optimization preview and persistence
+-------------------------------------------------
+Function:
+- app.js -> handleGlobalReoptimize()
+
+Process:
+- Calls solveGlobalReoptimization(state.orders)
+- Builds before/after utilization tables by:
+  - running solveScheduleGreedy for each month
+  - computing utilization via computeUtilization
+- Shows a modal with "Current utilization" vs "Optimized preview"
+- Syncs horizontal scrolling of the two tables
+- On Save:
+  - Updates changed orders via apiUpdateOrder(...)
+  - Creates new split-child orders via apiCreateOrder(...)
+  - Clears solution cache and re-renders
+  - Stores before/after snapshots in optimize history (apiCreateOptimizeHistory)
+
+
+8) Functions referenced
+----------------------
+Core MILP-like computation:
+- solveScheduleGreedy (milpScheduler.js)
+  - machine_summary, backlogged_operations, machine_deviation, objectiveApprox
+
+Re-scheduling:
+- solveGlobalReoptimization (app.js)
+- splitOrderIntoNextMonth (app.js)
+
+Evaluation/metrics:
+- computeUtilization (app.js)
+- utilHeatStyle (app.js)
+
+UI:
+- renderDashboard (app.js)
+- renderForecast (app.js)
+- handleGlobalReoptimize (app.js)
+
+Persistence:
+- apiUpdateOrder / apiCreateOrder (app.js -> api/orders.php)
+- apiCreateOptimizeHistory / apiRestoreOptimizeHistory (app.js -> api/optimize_history.php)
+
+
+9) Appendix: MILP formulas -> Code mapping (milpScheduler.js)
+-----------------------------------------------------------
+This appendix maps the MILP model symbols (from the paper/formulas) to the JavaScript implementation
+in 0_plainCodes/milpScheduler.js -> solveScheduleGreedy(...).
+
+A) Sets and indices
+- i ∈ I (machines)
+  - Code: const I = machines.map((m) => m.name)
+- r ∈ R (orders)
+  - Code: input orders[] elements (each has order_id, part_code, quantity)
+- j ∈ J (operation-jobs)
+  - Code: J[] built inside solveScheduleGreedy by expanding each order into required operations/stages
+
+B) Parameters
+- q_r (order quantity)
+  - Code: j.quantity taken from orders[].quantity
+- a_ij (machine eligibility)
+  - Code: eligibleAll = j.stage_options ?? routingLong[part][operation] (only these machines are considered)
+- π_ij (alternative route indicator)
+  - Code: option.pi_ij (0=primary, 1=alternative). In MACHINE_ROUTE this is derived from route_value (1 vs 1.1).
+- t_ij (unit time) and s_ij (setup time)
+  - Code: timeRow.unit_time_min_per_unit and timeRow.setup_time_min (from TIMES)
+- A_i (regular capacity) and OT_i^max (max overtime)
+  - Code: m.A_min and m.OT_max from the machine calendar objects
+- λ_OT, λ_BL, λ_ALT (penalty weights)
+  - Code: lambdaOT, lambdaBL, lambdaALT passed into solveScheduleGreedy
+
+C) Derived processing time
+- p_ij = t_ij * q_r
+  - Code: processing = unitTimeMinPerUnit * quantity (in computeTotalTimeMin)
+- total_time_ij = p_ij + s_ij
+  - Code: computeTotalTimeMin({ unitTimeMinPerUnit, setupTimeMin, quantity })
+
+D) Decision variables (MILP) vs returned solution (greedy approximation)
+- x_ij ∈ {0,1} (assignment)
+  - MILP: choose x_ij variables to assign each operation-job j to one machine i
+  - Code (greedy): for each operation-job j, exactly one best machine is selected and recorded as:
+    - assignments.push({ order_id, operation, machine, route_type, total_time_min, ... })
+- y_j ∈ {0,1} (backlog indicator)
+  - Code: backlogged_operations.push({ order_id, operation, reason })
+
+E) Constraints mapping
+1) Utilized time definition
+   U_i = Σ_j (p_ij + s_ij) x_ij
+   - Code: utilizedByMachine[machine] accumulates best.totalTimeMin for each assignment
+
+2) Assignment constraint (with backlog option)
+   Σ_i x_ij + y_j = 1  ∀ j
+   - Code: each operation-job j results in either:
+     - one entry in assignments[] (assigned), OR
+     - one entry in backlogged_operations[] (backlogged), if allowBacklog=true
+
+3) Eligibility constraint
+   x_ij ≤ a_ij  ∀ i,j
+   - Code: only machines listed in eligibleAll are evaluated; others are never considered.
+
+4) Capacity constraint with overtime
+   U_i ≤ A_i + OT_i
+   OT_i ≤ OT_i^max
+   - Code: candidate machine is feasible only if:
+     overtimeNeeded = max(0, newUtilized - A_min)
+     overtimeNeeded <= OT_max
+   - Final reported OT:
+     OT_min = min(OT_max, max(0, U_min - A_min))
+
+5) Average utilization definition
+   Ū = (1/|I|) Σ_i U_i
+   - Code: U_avg computed from machine_summary
+
+6) Utilization deviation constraints
+   U_i - Ū = D_i^+ - D_i^- ,  D_i^+ >= 0, D_i^- >= 0
+   - Code: machine_deviation[] with:
+     D_plus = max(0, U_i - U_avg)
+     D_minus = max(0, -(U_i - U_avg))
+
+F) Objective function mapping
+MILP objective:
+  min Z = Σ_i (D_i^+ + D_i^-)
+        + λ_OT Σ_i OT_i
+        + λ_BL Σ_j y_j
+        + λ_ALT Σ_i Σ_j π_ij x_ij
+
+Code objective approximation (objectiveApprox):
+- totalImbalance = Σ_i (D_plus + D_minus)
+- totalOT        = Σ_i OT_min
+- totalBacklog   = count(backlogged_operations)   (approximates Σ_j y_j)
+- totalAlt       = count(assignments where route_type == 'ALT') (approximates Σ_i Σ_j π_ij x_ij)
+
+objectiveApprox = totalImbalance
+               + lambdaOT * totalOT
+               + lambdaBL * totalBacklog
+               + lambdaALT * totalAlt
+
+Note: solveScheduleGreedy uses a greedy selection strategy to build a feasible schedule; therefore
+objectiveApprox is an evaluation of that greedy schedule under the MILP objective structure, not a
+globally optimal MILP solution.

@@ -59,7 +59,8 @@ function escapeHtml(s) {
 }
 
 function utilHeatStyle(pct) {
-  const p = clamp(Number(pct) || 0, 0, 150);
+  // Keep coloring consistent with UI display which rounds to whole percent.
+  const p = clamp(Math.round(Number(pct) || 0), 0, 150);
 
   const isLight = document.documentElement.getAttribute('data-theme') === 'light';
 
@@ -86,13 +87,13 @@ function utilHeatStyle(pct) {
 
   // HSL colors converted to RGB for interpolation
   const GREEN_RGB = [34, 197, 94];   // Approx HSL(120, 85%, 45%)
-  const ORANGE_RGB = [249, 115, 22]; // Midpoint for 90%
+  const ORANGE_RGB = [250, 204, 21]; // Yellow warning at 90% (over-utilized starts from yellow)
   const RED_RGB = [239, 68, 68];    // Final over-utilized
 
   let rgb;
   let hue;
 
-  if (p <= 90) {
+  if (p < 90) {
     // Keep user's exact hue logic for 0-90% (Yellow -> Green)
     hue = 50 + (120 - 50) * (p / 90);
     // Use HSLA directly for this range
@@ -107,7 +108,7 @@ function utilHeatStyle(pct) {
     return { bg, fg };
   } else {
     // For > 90%, use RGB interpolation to avoid the "hue-back-to-yellow" bug.
-    // Transition: Green -> Orange -> Red
+    // Transition: Yellow -> Red
     const t = clamp((p - 90) / 30, 0, 1);
     rgb = mixRgb(ORANGE_RGB, RED_RGB, t);
 
@@ -752,7 +753,7 @@ function renderMachineInfo() {
     const backlogHtml = previewBacklogs.length
       ? `<div class="stack" style="gap: 6px; margin-top: 10px;">${previewBacklogs
           .map(
-            (b) => `<div class="small" style="color: #fecaca;"><strong>${escapeHtml(b.operation)}:</strong> ${escapeHtml(simplifyReason(b.reason))}</div>`
+            (b) => `<div class="small" style="color: rgba(185, 28, 28, 0.95);"><strong>${escapeHtml(b.operation)}:</strong> ${escapeHtml(simplifyReason(b.reason))}</div>`
           )
           .join('')}</div>`
       : '';
@@ -1288,7 +1289,7 @@ async function handleScheduleJob() {
       ${wasAutoRescheduled ? `automatically scheduled for <strong>${scheduleLabel}</strong>` : `scheduled for <strong>${escapeHtml(monthLabel(order.month))}</strong>`}
     </div>
     ${refHtml}
-    ${wasAutoRescheduled ? `<div class="hint" style="margin-bottom: 12px; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); color: #fecaca;">
+    ${wasAutoRescheduled ? `<div class="hint" style="margin-bottom: 12px; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); color: rgba(185, 28, 28, 0.95);">
       ${escapeHtml(autoRescheduleReason || '')}
     </div>` : ''}
     <div class="muted" style="margin-bottom: 12px;">Part: <strong>${escapeHtml(order.part_code)}</strong> | Quantity: <strong>${order.quantity}</strong></div>
@@ -1412,26 +1413,22 @@ async function handleScheduleJob() {
   }
 
   if (wasAutoRescheduled || anyOver) {
-    const rebalanceCap = Math.max(0.6, SOLVER_CONFIG.primaryUtilizationCap - 0.15);
-    
     bodyHtml += `
       <div style="font-weight: 900; margin-top: 14px; margin-bottom: 8px;">Rescheduling Actions</div>
-      <div class="item" style="padding: 10px;">
-        <div class="small" style="margin-bottom: 10px;">
-          ${backlogged.length ? 'This order still has backlogged operations in the new month. ' : ''}
-          ${anyOver ? 'Some assigned machines are over-utilized. ' : ''}
-        </div>
-        <div class="actions" style="justify-content: flex-start; gap: 10px; flex-wrap: wrap;">
-          ${wasAutoRescheduled ? `<button class="btn danger" type="button" id="cancelRescheduleBtn">Cancel & Revert to ${escapeHtml(monthLabel(state.jobForm.month))}</button>` : ''}
-          <button class="btn" type="button" id="rebalanceBtn">Try Rebalance (allow alts earlier)</button>
-          ${!wasAutoRescheduled ? `<button class="btn" type="button" id="nextMonthBtn">Move order to ${escapeHtml(nextMonth)}</button>` : ''}
-        </div>
+      <div class="actions" style="justify-content: flex-start; gap: 10px; flex-wrap: wrap;">
+        ${wasAutoRescheduled ? `<button class="btn danger" type="button" id="cancelRescheduleBtn">Cancel & Revert to ${escapeHtml(
+          monthLabel(state.jobForm.month)
+        )}</button>` : ''}
+        <button class="btn" type="button" id="rebalanceBtn" style="display: none;">Try Rebalance (allow alts earlier)</button>
+        ${!wasAutoRescheduled ? `<button class="btn" type="button" id="nextMonthBtn">Move order to ${escapeHtml(
+          nextMonth
+        )}</button>` : ''}
       </div>
     `;
   }
 
   renderModalHtml({
-    title: wasAutoRescheduled ? 'Automatic Reschedule' : 'Schedule Result',
+    title: 'Schedule Result',
     titleColor: assigned.length && backlogged.length === 0 ? '#86efac' : '#fde68a',
     bodyHtml
   });
@@ -1707,18 +1704,26 @@ function renderDashboard() {
       <div class="item"><div class="small">Normal-utilized</div><div style="font-weight: 900; color: #86efac;">${normal.length}</div></div>
       <div class="item"><div class="small">Over-utilized</div><div style="font-weight: 900; color: #fecaca;">${over.length}</div></div>
     </div>
+    <div class="util-legend" style="margin-top: 12px; margin-bottom: 0; justify-content: flex-start; gap: 12px;">
+      <div class="small muted">Legend</div>
+      <div class="util-legend-items">
+        <span class="pill yellow">Under (&lt;70%)</span>
+        <span class="pill green">Normal (70–89%)</span>
+        <span class="pill red">Over (≥90%)</span>
+      </div>
+    </div>
   `;
   grid.appendChild(summary);
 
   for (const ms of solution.machine_summary) {
     const u = utilArr.find((x) => x.machine === ms.machine);
     const utilizationPct = (u?.regularUtil ?? 0) * 100;
+    const shownPct = Number(utilizationPct.toFixed(1));
     const availableRegular = Math.max(0, ms.A_min - ms.U_min);
     const availableMax = Math.max(0, ms.A_min + ms.OT_max - ms.U_min);
 
-    const machineMeta = state.machines.find((m) => m.name === ms.machine);
-
-    const statusText = utilizationPct < 70 ? 'UNDER-UTILIZED' : utilizationPct < 90 ? 'NORMAL' : 'OVER-UTILIZED';
+    const statusText = shownPct < 70 ? 'UNDER-UTILIZED' : shownPct < 90 ? 'NORMAL' : 'OVER-UTILIZED';
+    const barStyle = utilHeatStyle(shownPct);
 
     const card = document.createElement('div');
     card.className = 'card';
@@ -1726,22 +1731,12 @@ function renderDashboard() {
       <div class="item-top" style="margin-bottom: 10px;">
         <div>
           <div style="font-weight: 900; font-size: 16px;">${escapeHtml(ms.machine)}</div>
-          <div class="small">
-            Planning bucket: <strong>month</strong>
-            <span class="muted">(Regular: ${ms.A_min} min | OT max: ${ms.OT_max} min)</span>
-          </div>
           <div class="small">Status: <strong>${escapeHtml(statusText)}</strong></div>
-          ${machineMeta
-            ? `<div class="small">Daily calendar: ${machineMeta.workHoursPerDay}h/day (${machineMeta.A_day_min} min) | OT policy: ${machineMeta.maxOtHoursPerDay}h/day (${machineMeta.OT_day_max} min) | Work days: ${machineMeta.workDaysPerMonth}/month</div>`
-            : ''}
         </div>
-        <span class="pill ${getPillClass(utilizationPct)}">${utilizationPct.toFixed(1)}%</span>
+        <span class="pill ${getPillClass(shownPct)}">${shownPct.toFixed(1)}%</span>
       </div>
       <div class="stack" style="gap: 10px;">
-        <div class="progress"><div class="${getUtilizationClass(utilizationPct)}" style="width: ${Math.min(
-          utilizationPct,
-          100
-        )}%"></div></div>
+        <div class="progress"><div style="width: ${Math.min(shownPct, 100)}%; background: ${barStyle.bg};"></div></div>
         <div class="grid-2" style="grid-template-columns: 1fr 1fr; gap: 10px;">
           <div class="item"><div class="small">Utilized (U<sub>i</sub>)</div><div style="font-weight: 900; color: rgba(34, 211, 238, 1);">${ms.U_min.toFixed(
             2
@@ -1816,7 +1811,7 @@ function renderCalendar() {
       : '<div class="small muted">No assignment (backlogged)</div>';
 
     const backlogHtml = backlogs.length
-      ? `<div class="small" style="color: #fecaca; margin-top: 6px;">Backlogged: ${escapeHtml(
+      ? `<div class="small" style="color: rgba(185, 28, 28, 0.95); margin-top: 6px;">Backlogged: ${escapeHtml(
           backlogs.map((b) => b.operation).join(', ')
         )}</div>`
       : '';
@@ -2095,8 +2090,11 @@ function solveGlobalReoptimization(allOrders) {
     return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
   });
 
+  const origMonthById = Object.fromEntries(allOrders.map((o) => [o.id, o.month]));
+
   const year = Number.parseInt(String(state.currentMonth || isoMonth(new Date())).slice(0, 4), 10);
-  const months = Array.from({ length: 12 }, (_, idx) => `${year}-${String(idx + 1).padStart(2, '0')}`);
+  const baseYear = Number.isFinite(year) ? year : new Date().getFullYear();
+  const months = [...monthsOfYear(baseYear), ...monthsOfYear(baseYear + 1)];
 
   const optimizedOrders = [];
 
@@ -2127,8 +2125,57 @@ function solveGlobalReoptimization(allOrders) {
     return { sol, backlogCount: sol.backlogged_operations.length, maxRegularUtil };
   };
 
+  const badMonths = new Set();
+  const movableOrderIdsByMonth = {};
+  for (const m of months) {
+    const inMonth = allOrders.filter((o) => o.month === m);
+    if (!inMonth.length) continue;
+
+    const { sol, backlogCount, maxRegularUtil } = evaluateMonth(m, inMonth);
+    if (backlogCount > 0 || maxRegularUtil > cap + 1e-6) badMonths.add(m);
+
+    const utilArr = computeUtilization({ machineSummary: sol.machine_summary });
+    const overMachines = new Set(
+      utilArr.filter((u) => (u.regularUtil ?? 0) > cap + 1e-6).map((u) => u.machine)
+    );
+
+    const movableOrderIds = new Set();
+
+    // Orders that consume time on any over-cap machine are eligible to move.
+    for (const a of sol.assignments || []) {
+      if (overMachines.has(a.machine)) movableOrderIds.add(a.order_id);
+    }
+
+    // Orders that are capacity-backlogged are also eligible to move.
+    for (const b of sol.backlogged_operations || []) {
+      if (!isCapacityBacklogReason(b.reason)) continue;
+      movableOrderIds.add(b.order_id);
+    }
+
+    movableOrderIdsByMonth[m] = movableOrderIds;
+  }
+
+  const isMovableFromMonth = (o) => {
+    if (!badMonths.has(o.month)) return false;
+    const set = movableOrderIdsByMonth[o.month];
+    if (!set || !set.size) return false;
+    return set.has(o.order_id);
+  };
+
+  const isMovableFromOrigin = (o) => {
+    const originMonth = origMonthById[o.id];
+    if (!originMonth) return true;
+    if (!badMonths.has(originMonth)) return false;
+    const set = movableOrderIdsByMonth[originMonth];
+    if (!set || !set.size) return false;
+    return set.has(o.order_id);
+  };
+
+  const fixedOrders = sortedOrders.filter((o) => !isMovableFromMonth(o));
+  for (const o of fixedOrders) optimizedOrders.push({ ...o, month: o.month });
+
   // Phase 1: move whole orders forward (no splitting), prefer fewer backlogs and lower over-cap.
-  for (const order of sortedOrders) {
+  for (const order of sortedOrders.filter((o) => isMovableFromMonth(o))) {
     let bestMonth = order.month;
     let bestScore = null;
 
@@ -2205,6 +2252,7 @@ function solveGlobalReoptimization(allOrders) {
 
       // Pick a candidate: lowest priority first, then newest first, then biggest quantity.
       const candidates = [...monthOrders]
+        .filter((o) => isMovableFromOrigin(o))
         .filter((o) => (o.quantity ?? 0) > 1)
         .sort((a, b) => {
           const pa = priorityRank[a.priority] ?? 1;
@@ -2297,6 +2345,11 @@ function renderForecast() {
   const machineNames = state.machines.map((m) => m.name);
   const utilByMonthMachine = {};
 
+  const curSol = getSolution(state.currentMonth);
+  const curUtilArr = computeUtilization({ machineSummary: curSol.machine_summary });
+  const overUtilCount = curUtilArr.filter((u) => ((u?.regularUtil ?? 0) * 100) >= 100).length;
+  const showReoptBtn = overUtilCount < 3;
+
   for (const month of months) {
     const sol = getSolution(month);
     const utilArr = computeUtilization({ machineSummary: sol.machine_summary });
@@ -2313,10 +2366,16 @@ function renderForecast() {
 
   wrap.innerHTML = `
     <div style="margin-bottom: 20px;">
-      <button class="btn primary" type="button" id="forecastReoptBtn" style="width: 100%;">
-        <i data-lucide="refresh-cw" style="width:16px;height:16px;margin-right:8px;"></i>
-        Re-optimize Load
-      </button>
+      ${
+        showReoptBtn
+          ? `
+            <button class="btn primary" type="button" id="forecastReoptBtn" style="width: 100%;">
+              <i data-lucide="refresh-cw" style="width:16px;height:16px;margin-right:8px;"></i>
+              Re-optimize Load
+            </button>
+          `
+          : ''
+      }
     </div>
     <div class="util-legend">
       <div class="small muted">Legend</div>
@@ -2480,9 +2539,31 @@ async function handleGlobalReoptimize() {
     `
   });
 
+  // Sync horizontal scrolling between the two preview tables.
   const modalBody = document.getElementById('modalBody');
-  const actions = modalBody?.querySelector('.actions');
-  const modalClose = modalBody?.querySelector('#modalClose');
+  const scrollBoxes = modalBody ? [...modalBody.querySelectorAll('.reopt-table-scroll')] : [];
+  if (scrollBoxes.length >= 2) {
+    const a = scrollBoxes[0];
+    const b = scrollBoxes[1];
+
+    a.scrollLeft = 0;
+    b.scrollLeft = 0;
+
+    let syncing = false;
+    const sync = (src, dst) => {
+      if (syncing) return;
+      syncing = true;
+      dst.scrollLeft = src.scrollLeft;
+      syncing = false;
+    };
+
+    a.addEventListener('scroll', () => sync(a, b));
+    b.addEventListener('scroll', () => sync(b, a));
+  }
+
+  const modalBody2 = document.getElementById('modalBody');
+  const actions = modalBody2?.querySelector('.actions');
+  const modalClose = modalBody2?.querySelector('#modalClose');
   if (modalClose) modalClose.textContent = 'Cancel';
 
   const saveBtn = document.createElement('button');
