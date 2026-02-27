@@ -101,7 +101,14 @@ const PART_SIZES = {
   AC060: '572.5 × 216.9 mm',
   AC061: '506.2 × 187.7 mm',
   AC062: '568.00 × 650.50 mm',
-  AC063: '557.6 mm × 411'
+  AC063: '557.6 mm × 411',
+  AC064: 'N/A',
+  AC065: '70 × 181.9 mm',
+  AC066: '1820.5 × 1025.2 mm',
+  AC067: '484 mm × 495.12 mm',
+  AC068: '974 mm × 374.5 mm',
+  AC069: '226 × 65.5',
+  AC070: '312.8 × 211.8'
 };
 
 const MACHINE_ROUTE = typeof window !== 'undefined' && window.MACHINE_ROUTE_FULL ? window.MACHINE_ROUTE_FULL : {};

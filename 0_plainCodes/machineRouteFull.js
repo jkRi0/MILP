@@ -566,5 +566,41 @@ window.MACHINE_ROUTE_FULL = {
       "machine": "Turret Machine 3",
       "route_value": 1.0
     }
+  ],
+  "AC065": [
+    {
+      "machine": "Turret Machine 1",
+      "route_value": 1.0
+    }
+  ],
+  "AC066": [
+    {
+      "machine": "Turret Machine 2",
+      "route_value": 1.0
+    }
+  ],
+  "AC067": [
+    {
+      "machine": "Turret Machine 3",
+      "route_value": 1.0
+    }
+  ],
+  "AC068": [
+    {
+      "machine": "Arc Welding Machine",
+      "route_value": 1.0
+    }
+  ],
+  "AC069": [
+    {
+      "machine": "Spot Weld 1",
+      "route_value": 1.0
+    }
+  ],
+  "AC070": [
+    {
+      "machine": "Spot Weld 2",
+      "route_value": 1.0
+    }
   ]
 };

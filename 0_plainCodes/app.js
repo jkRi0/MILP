@@ -85,40 +85,15 @@ function utilHeatStyle(pct) {
     return L > 0.52 ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.92)';
   };
 
-  // HSL colors converted to RGB for interpolation
-  const GREEN_RGB = [34, 197, 94];   // Approx HSL(120, 85%, 45%)
-  const ORANGE_RGB = [250, 204, 21]; // Yellow warning at 90% (over-utilized starts from yellow)
-  const RED_RGB = [239, 68, 68];    // Final over-utilized
+  const YELLOW_RGB = [250, 204, 21];
+  const GREEN_RGB = [34, 197, 94];
+  const RED_RGB = [239, 68, 68];
 
-  let rgb;
-  let hue;
-
-  if (p < 90) {
-    // Keep user's exact hue logic for 0-90% (Yellow -> Green)
-    hue = 50 + (120 - 50) * (p / 90);
-    // Use HSLA directly for this range
-    // Light theme: increase alpha + lightness for better contrast with dark text.
-    const L = isLight ? 62 : 45;
-    const A = isLight ? 0.65 : 0.50;
-    const bg = `hsla(${hue.toFixed(1)}, 85%, ${L}%, ${A})`;
-
-    // In light theme, the cell is bright, so use dark text.
-    // In dark theme, keep bright-tinted text.
-    const fg = isLight ? 'rgba(15, 23, 42, 0.92)' : `hsl(${hue.toFixed(1)}, 90%, 84%)`;
-    return { bg, fg };
-  } else {
-    // For > 90%, use RGB interpolation to avoid the "hue-back-to-yellow" bug.
-    // Transition: Yellow -> Red
-    const t = clamp((p - 90) / 30, 0, 1);
-    rgb = mixRgb(ORANGE_RGB, RED_RGB, t);
-
-    const bgAlpha = isLight ? 0.70 : 0.50;
-    const bg = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${bgAlpha})`;
-
-    // Choose foreground based on luma to ensure readability in both themes.
-    const fg = isLight ? pickFgForRgb(rgb) : `rgb(${mixRgb(rgb, [255, 255, 255], 0.75).join(', ')})`;
-    return { bg, fg };
-  }
+  const rgb = p < 70 ? YELLOW_RGB : p < 90 ? GREEN_RGB : RED_RGB;
+  const bgAlpha = isLight ? 0.70 : 0.50;
+  const bg = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${bgAlpha})`;
+  const fg = isLight ? pickFgForRgb(rgb) : `rgb(${mixRgb(rgb, [255, 255, 255], 0.75).join(', ')})`;
+  return { bg, fg };
 }
 
 function splitRefInfo(orderId) {
@@ -2901,6 +2876,39 @@ function init() {
     else document.documentElement.removeAttribute('data-theme');
   } catch {
     // ignore
+  }
+
+  const extraRoutingLong = {
+    AC065: { Op1: [{ machine: 'Turret Machine 1', pi_ij: 0 }] },
+    AC066: { Op1: [{ machine: 'Turret Machine 2', pi_ij: 0 }] },
+    AC067: { Op1: [{ machine: 'Turret Machine 3', pi_ij: 0 }] },
+    AC068: { Op1: [{ machine: 'Arc Welding Machine', pi_ij: 0 }] },
+    AC069: { Op1: [{ machine: 'Spot Weld 1', pi_ij: 0 }] },
+    AC070: { Op1: [{ machine: 'Spot Weld 2', pi_ij: 0 }] }
+  };
+
+  const extraTimes = {
+    AC065: { Op1: { 'Turret Machine 1': { unit_time_min_per_unit: 1.77, setup_time_min: 6.98 } } },
+    AC066: { Op1: { 'Turret Machine 2': { unit_time_min_per_unit: 1.78, setup_time_min: 8.27 } } },
+    AC067: { Op1: { 'Turret Machine 3': { unit_time_min_per_unit: 0.82, setup_time_min: 6.51 } } },
+    AC068: { Op1: { 'Arc Welding Machine': { unit_time_min_per_unit: 1.78, setup_time_min: 8.27 } } },
+    AC069: { Op1: { 'Spot Weld 1': { unit_time_min_per_unit: 1.77, setup_time_min: 3.67 } } },
+    AC070: { Op1: { 'Spot Weld 2': { unit_time_min_per_unit: 0.97, setup_time_min: 9.38 } } }
+  };
+
+  for (const p of Object.keys(extraRoutingLong)) {
+    if (!ROUTING_LONG?.[p]) ROUTING_LONG[p] = extraRoutingLong[p];
+    if (!TIMES?.[p]) TIMES[p] = extraTimes[p];
+  }
+
+  const partCodeSelect = document.getElementById('partCode');
+  if (partCodeSelect) {
+    const cur = String(partCodeSelect.value || state.jobForm.partCode || '');
+    const partCodes = Object.keys(PART_SIZES || {}).sort();
+    partCodeSelect.innerHTML =
+      `<option value="">Choose a part code...</option>` +
+      partCodes.map((p) => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
+    if (cur && partCodes.includes(cur)) partCodeSelect.value = cur;
   }
 
   apiMe()
